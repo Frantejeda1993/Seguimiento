@@ -152,9 +152,12 @@ class InventoryManager:
         compras = self._calculate_sales_metrics(compras)
         
         # Calculate months of stock
+        avg_3y_col = f'Promedio {self.current_year - 2} - {self.current_year}'
+        prev_year_col = f'Promedio {self.current_year - 1}'
+
         compras['Meses de Stock'] = compras.apply(
-            lambda row: row['Stock Unidades'] / ((row['Promedio 2023 - 2026'] - row['Promedio 2025']) / 12)
-            if (row['Promedio 2023 - 2026'] - row['Promedio 2025']) > 0
+            lambda row: row['Stock Unidades'] / (row[avg_3y_col] - row[prev_year_col])
+            if (row[avg_3y_col] - row[prev_year_col]) > 0
             else 0,
             axis=1
         )
@@ -220,16 +223,16 @@ class InventoryManager:
         ].groupby('Artículo')['Unidades Venta'].sum()
         df[f'Ventas {current_year}'] = df['SKU'].map(sales_year).fillna(0)
         
-        # Previous year average
+        # Previous year monthly average
         sales_prev_year = ventas_grouped[
             ventas_grouped['Año Factura'] == current_year - 1
-        ].groupby('Artículo')['Unidades Venta'].sum()
+        ].groupby('Artículo')['Unidades Venta'].sum() / 12
         df[f'Promedio {current_year - 1}'] = df['SKU'].map(sales_prev_year).fillna(0)
         
-        # 3-year average
+        # 3-year monthly average
         sales_3y = ventas_grouped[
             ventas_grouped['Año Factura'].isin([current_year - 2, current_year - 1, current_year])
-        ].groupby('Artículo')['Unidades Venta'].sum()
+        ].groupby('Artículo')['Unidades Venta'].sum() / 36
         df[f'Promedio {current_year - 2} - {current_year}'] = df['SKU'].map(sales_3y).fillna(0)
         
         return df
@@ -243,7 +246,7 @@ class InventoryManager:
             if avg_sales <= 0:
                 return 0
             
-            monthly_need = avg_sales / 12 * self.meses_compras
+            monthly_need = avg_sales * self.meses_compras
             current_stock = row['Stock Unidades']
             
             quantity_needed = monthly_need - current_stock
