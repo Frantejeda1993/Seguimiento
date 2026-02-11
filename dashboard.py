@@ -58,11 +58,13 @@ def require_auth() -> bool:
         )
         return False
 
-    password = st.text_input("Password", type="password", key="password_input")
-    if st.button("Sign in", type="primary"):
+    with st.form("auth_form", clear_on_submit=True):
+        password = st.text_input("Password", type="password", key="password_input")
+        sign_in = st.form_submit_button("Sign in", type="primary")
+
+    if sign_in:
         if hmac.compare_digest(password, str(st.secrets["APP_PASSWORD"])):
             st.session_state.authenticated = True
-            st.session_state.password_input = ""
             st.rerun()
         else:
             st.error("Incorrect password. Please try again.")
