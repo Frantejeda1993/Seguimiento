@@ -152,9 +152,12 @@ class InventoryManager:
         compras = self._calculate_sales_metrics(compras)
         
         # Calculate months of stock
+        avg_3y_col = f'Promedio {self.current_year - 2} - {self.current_year}'
+        prev_year_col = f'Promedio {self.current_year - 1}'
+
         compras['Meses de Stock'] = compras.apply(
-            lambda row: row['Stock Unidades'] / ((row['Promedio 2023 - 2026'] - row['Promedio 2025']) / 12)
-            if (row['Promedio 2023 - 2026'] - row['Promedio 2025']) > 0
+            lambda row: row['Stock Unidades'] / ((row[avg_3y_col] - row[prev_year_col]) / 12)
+            if (row[avg_3y_col] - row[prev_year_col]) > 0
             else 0,
             axis=1
         )
