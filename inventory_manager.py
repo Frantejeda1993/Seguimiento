@@ -238,35 +238,37 @@ class InventoryManager:
         return df
     
     def _calculate_pedido(self, row, contemplar_sobre_stock: bool) -> float:
-        """Calculate the purchase order quantity."""
-        try:
-            avg_sales = (row[f'Promedio {self.current_year - 2} - {self.current_year}'] - 
-                        row[f'Promedio {self.current_year - 1}'])
-            
-            if avg_sales <= 0:
-                return 0
-            
-            monthly_need = avg_sales * self.meses_compras
-            current_stock = row['Stock Unidades']
-            
-            quantity_needed = monthly_need - current_stock
-            
-            # Check if should consider over-stock
-            min_threshold = -1000 if contemplar_sobre_stock else 0
-            
-            if quantity_needed < min_threshold:
-                return 0
-            
-            if not row['COMPRAR']:
-                return 0
-            
-            # Round based on decimal part
-            if quantity_needed % 1 >= 0.9:
-                return np.ceil(quantity_needed)
-            else:
-                return np.floor(quantity_needed)
-        except:
+    """Calculate the purchase order quantity."""
+    try:
+        # Promedio 2023-2026 - Ventas año actual - Stock actual
+        promedio_total = row[f'Promedio {self.current_year - 2} - {self.current_year}']
+        ventas_ano_actual = row[f'Ventas {self.current_year}']
+        stock_actual = row['Stock Unidades']
+        
+        # Calcular necesidad: (Promedio - Ventas año - Stock) / 12 * meses_compras
+        necesidad_base = promedio_total - ventas_ano_actual - stock_actual
+        quantity_needed = (necesidad_base / 12) * self.meses_compras
+        
+        # Si es negativo y NO contemplar sobre stock → no comprar
+        if quantity_needed < 0 and not contemplar_sobre_stock:
             return 0
+        
+        # Si es negativo y SÍ contemplar sobre stock → seguir con el cálculo
+        
+        # No comprar si el estado indica que no se debe comprar
+        if not row['COMPRAR']:
+            return 0
+        
+        # Redondear: solo hacia arriba si el decimal es >= 0.9
+        decimal_part = abs(quantity_needed) % 1
+        
+        if decimal_part >= 0.9:
+            return np.ceil(quantity_needed)
+        else:
+            return np.floor(quantity_needed)
+            
+    except Exception as e:
+        return 0
     
     def calculate_clientes(self) -> pd.DataFrame:
         """
