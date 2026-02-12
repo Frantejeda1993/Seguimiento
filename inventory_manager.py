@@ -182,60 +182,62 @@ class InventoryManager:
         return compras
     
     def _calculate_sales_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate sales metrics for different periods."""
-        # Group sales by SKU and month/year
-        ventas_grouped = self.ventas_df.groupby(['Artículo', 'Año Factura', 'Mes Factura'])['Unidades Venta'].sum().reset_index()
-        
-        current_year = self.current_year
-        current_month = self.current_month
-        
-        # Sales 2 months ago
-        month_m2 = current_month - 2 if current_month > 2 else current_month - 2 + 12
-        year_m2 = current_year if current_month > 2 else current_year - 1
-        
-        sales_m2 = ventas_grouped[
-            (ventas_grouped['Año Factura'] == year_m2) & 
-            (ventas_grouped['Mes Factura'] == month_m2)
-        ].set_index('Artículo')['Unidades Venta']
-        
-        # Sales 1 month ago
-        month_m1 = current_month - 1 if current_month > 1 else 12
-        year_m1 = current_year if current_month > 1 else current_year - 1
-        
-        sales_m1 = ventas_grouped[
-            (ventas_grouped['Año Factura'] == year_m1) & 
-            (ventas_grouped['Mes Factura'] == month_m1)
-        ].set_index('Artículo')['Unidades Venta']
-        
-        # Current month sales
-        sales_current = ventas_grouped[
-            (ventas_grouped['Año Factura'] == current_year) & 
-            (ventas_grouped['Mes Factura'] == current_month)
-        ].set_index('Artículo')['Unidades Venta']
-        
-        df['Ventas -2 meses'] = df['SKU'].map(sales_m2).fillna(0)
-        df['Ventas -1 mes'] = df['SKU'].map(sales_m1).fillna(0)
-        df['Ventas mes'] = df['SKU'].map(sales_current).fillna(0)
-        
-        # Current year total
-        sales_year = ventas_grouped[
-            ventas_grouped['Año Factura'] == current_year
-        ].groupby('Artículo')['Unidades Venta'].sum()
-        df[f'Ventas {current_year}'] = df['SKU'].map(sales_year).fillna(0)
-        
-        # Previous year monthly average
-        sales_prev_year = ventas_grouped[
-            ventas_grouped['Año Factura'] == current_year - 1
-        ].groupby('Artículo')['Unidades Venta'].sum() / 12
-        df[f'Promedio {current_year - 1}'] = df['SKU'].map(sales_prev_year).fillna(0)
-        
-        # 3-year monthly average
-        sales_3y = ventas_grouped[
-            ventas_grouped['Año Factura'].isin([current_year - 2, current_year - 1, current_year])
-        ].groupby('Artículo')['Unidades Venta'].sum() / 36
-        df[f'Promedio {current_year - 2} - {current_year}'] = df['SKU'].map(sales_3y).fillna(0)
-        
-        return df
+    """Calculate sales metrics for different periods."""
+    # Group sales by SKU and month/year
+    ventas_grouped = self.ventas_df.groupby(['Artículo', 'Año Factura', 'Mes Factura'])['Unidades Venta'].sum().reset_index()
+    
+    current_year = self.current_year
+    current_month = self.current_month
+    
+    # Sales 2 months ago
+    month_m2 = current_month - 2 if current_month > 2 else current_month - 2 + 12
+    year_m2 = current_year if current_month > 2 else current_year - 1
+    
+    sales_m2 = ventas_grouped[
+        (ventas_grouped['Año Factura'] == year_m2) & 
+        (ventas_grouped['Mes Factura'] == month_m2)
+    ].set_index('Artículo')['Unidades Venta']
+    
+    # Sales 1 month ago
+    month_m1 = current_month - 1 if current_month > 1 else 12
+    year_m1 = current_year if current_month > 1 else current_year - 1
+    
+    sales_m1 = ventas_grouped[
+        (ventas_grouped['Año Factura'] == year_m1) & 
+        (ventas_grouped['Mes Factura'] == month_m1)
+    ].set_index('Artículo')['Unidades Venta']
+    
+    # Current month sales
+    sales_current = ventas_grouped[
+        (ventas_grouped['Año Factura'] == current_year) & 
+        (ventas_grouped['Mes Factura'] == current_month)
+    ].set_index('Artículo')['Unidades Venta']
+    
+    df['Ventas -2 meses'] = df['SKU'].map(sales_m2).fillna(0)
+    df['Ventas -1 mes'] = df['SKU'].map(sales_m1).fillna(0)
+    df['Ventas mes'] = df['SKU'].map(sales_current).fillna(0)
+    
+    # Current year total
+    sales_year = ventas_grouped[
+        ventas_grouped['Año Factura'] == current_year
+    ].groupby('Artículo')['Unidades Venta'].sum()
+    df[f'Ventas {current_year}'] = df['SKU'].map(sales_year).fillna(0)
+    
+    # ==================== CORRECCIÓN AQUÍ ====================
+    # Previous year monthly average (PROMEDIO REAL, no suma/12)
+    prev_year_data = ventas_grouped[
+        ventas_grouped['Año Factura'] == current_year - 1
+    ].groupby('Artículo')['Unidades Venta'].mean()  # ← MEAN en vez de SUM/12
+    df[f'Promedio {current_year - 1}'] = df['SKU'].map(prev_year_data).fillna(0)
+    
+    # 3-year monthly average (PROMEDIO REAL, no suma/36)
+    three_year_data = ventas_grouped[
+        ventas_grouped['Año Factura'].isin([current_year - 2, current_year - 1, current_year])
+    ].groupby('Artículo')['Unidades Venta'].mean()  # ← MEAN en vez de SUM/36
+    df[f'Promedio {current_year - 2} - {current_year}'] = df['SKU'].map(three_year_data).fillna(0)
+    # =========================================================
+    
+    return df
     
     def _calculate_pedido(self, row, contemplar_sobre_stock: bool) -> float:
         """Calculate the purchase order quantity."""
