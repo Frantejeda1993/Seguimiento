@@ -9,6 +9,27 @@ import plotly.graph_objects as go
 from inventory_manager import InventoryManager
 import io
 import hmac
+import json
+import gzip
+import base64
+from datetime import datetime
+from pathlib import Path
+
+
+HISTORY_FILE = Path(".upload_history_local.json")
+MAX_CHUNK_SIZE = 700_000
+SNAPSHOT_COLUMNS = {
+    "stock": [
+        "Artículo", "Descripción", "Situación", "Stock", "Cartera", "Reservas",
+        "Pendiente Recibir Compra", "Pendiente Entrar Fabricación", "En Tránsito"
+    ],
+    "ventas": [
+        "Artículo", "Cliente", "Clave 1", "Año Factura", "Nombre Cliente", "Mes Factura",
+        "Descripción Artículo", "Precio Coste", "CR2: %Margen s/Venta sin Transporte Athena",
+        "Importe Neto", "Unidades Venta"
+    ],
+    "recepciones": ["Artículo", "Fecha Recepción", "Unidades Stock", "Precio"],
+}
 
 # Page configuration
 st.set_page_config(
@@ -139,6 +160,119 @@ def load_sample_data():
     return pd.DataFrame(stock_data), pd.DataFrame(sales_records), pd.DataFrame(receptions_records)
 
 
+def _get_firebase_collection():
+    """Return Firestore collection when configured, else None."""
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+    except Exception:
+        return None
+
+    if not firebase_admin._apps:
+        service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT")
+        if not service_account:
+            return None
+        if isinstance(service_account, str):
+            service_account = json.loads(service_account)
+        firebase_admin.initialize_app(credentials.Certificate(service_account))
+
+    return firestore.client().collection("upload_history")
+
+
+def _serialize_df(df: pd.DataFrame | None, kind: str):
+    if df is None:
+        return []
+    keep_cols = [c for c in SNAPSHOT_COLUMNS[kind] if c in df.columns]
+    data = df[keep_cols] if keep_cols else df
+    return json.loads(data.to_json(orient="records", date_format="iso"))
+
+
+def _deserialize_df(records):
+    if not records:
+        return None
+    return pd.DataFrame(records)
+
+
+def _encode_chunks(records):
+    payload = json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encoded = base64.b64encode(gzip.compress(payload)).decode("utf-8")
+    return [encoded[i:i + MAX_CHUNK_SIZE] for i in range(0, len(encoded), MAX_CHUNK_SIZE)]
+
+
+def _decode_chunks(chunks):
+    if not chunks:
+        return []
+    encoded = "".join(chunks)
+    raw = gzip.decompress(base64.b64decode(encoded.encode("utf-8")))
+    return json.loads(raw.decode("utf-8"))
+
+
+def _load_local_history():
+    if not HISTORY_FILE.exists():
+        return []
+    try:
+        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _save_local_history(history):
+    HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+
+
+def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload"):
+    stock_records = _serialize_df(stock_df, "stock")
+    ventas_records = _serialize_df(ventas_df, "ventas")
+    recepciones_records = _serialize_df(recepciones_df, "recepciones")
+
+    doc_payload = {
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "source": source,
+        "file_count": 2 + int(recepciones_df is not None),
+        "stock_chunks": _encode_chunks(stock_records),
+        "ventas_chunks": _encode_chunks(ventas_records),
+        "recepciones_chunks": _encode_chunks(recepciones_records),
+    }
+
+    collection = _get_firebase_collection()
+    if collection is not None:
+        ref = collection.document()
+        doc_payload["id"] = ref.id
+        ref.set(doc_payload)
+        return
+
+    history = _load_local_history()
+    snapshot_id = f"local-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    doc_payload["id"] = snapshot_id
+    history.append(doc_payload)
+    _save_local_history(history)
+
+
+def list_upload_dates():
+    collection = _get_firebase_collection()
+    if collection is not None:
+        docs = collection.order_by("uploaded_at", direction="DESCENDING").limit(50).stream()
+        return [doc.to_dict() for doc in docs]
+
+    history = sorted(_load_local_history(), key=lambda x: x.get("uploaded_at", ""), reverse=True)
+    return history[:50]
+
+
+def get_upload_by_id(upload_id: str):
+    collection = _get_firebase_collection()
+    if collection is not None:
+        doc = collection.document(upload_id).get()
+        if doc.exists:
+            return doc.to_dict()
+        return None
+
+    history = _load_local_history()
+    for item in history:
+        if item.get("id") == upload_id:
+            return item
+    return None
+
+
 def main():
     if not require_auth():
         st.stop()
@@ -174,6 +308,51 @@ def main():
             value=False,
             help="Include items that are over-stocked in recommendations"
         )
+
+        st.divider()
+
+        st.subheader("🕓 Histórico Firebase")
+        try:
+            history_items = list_upload_dates()
+        except Exception:
+            history_items = _load_local_history()
+            st.error("No se pudo conectar a Firebase...")
+
+        if history_items:
+            history_options = {}
+            for item in history_items:
+                uploaded_at = item.get("uploaded_at", "")
+                try:
+                    formatted_date = datetime.fromisoformat(uploaded_at.replace("Z", "")).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    formatted_date = uploaded_at
+                source = item.get("source", "upload")
+                file_count = item.get("file_count", 0)
+                label = f"{formatted_date} · {source} · {file_count} archivos"
+                history_options[label] = item.get("id")
+
+            selected_label = st.selectbox("Seleccionar carga histórica", options=list(history_options.keys()))
+            selected_id = history_options[selected_label]
+
+            if st.button("Cargar histórico"):
+                try:
+                    doc = get_upload_by_id(selected_id)
+                    if not doc:
+                        st.error("No se encontró el histórico seleccionado")
+                    else:
+                        manager = InventoryManager(meses_compras=meses_compras)
+                        manager.stock_df = _deserialize_df(_decode_chunks(doc.get("stock_chunks", [])))
+                        manager.ventas_df = _deserialize_df(_decode_chunks(doc.get("ventas_chunks", [])))
+                        manager.recepciones_df = _deserialize_df(_decode_chunks(doc.get("recepciones_chunks", [])))
+
+                        st.session_state.manager = manager
+                        st.session_state.data_loaded = True
+                        st.success("✅ Histórico cargado")
+                        st.rerun()
+                except Exception:
+                    st.error("No se pudo conectar a Firebase...")
+        else:
+            st.caption("Sin cargas históricas disponibles")
         
         st.divider()
         
@@ -252,6 +431,17 @@ def main():
                         
                         st.session_state.manager = manager
                         st.session_state.data_loaded = True
+
+                        try:
+                            save_upload_snapshot(
+                                manager.stock_df,
+                                manager.ventas_df,
+                                manager.recepciones_df,
+                                source="upload"
+                            )
+                        except Exception:
+                            st.error("No se pudo conectar a Firebase...")
+
                         st.success("✅ Data loaded successfully!")
                         st.rerun()
                     except Exception as e:
