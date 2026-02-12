@@ -153,11 +153,11 @@ class InventoryManager:
         
         # Calculate months of stock
         avg_3y_col = f'Promedio {self.current_year - 2} - {self.current_year}'
-        prev_year_col = f'Ventas {self.current_year - 1}'
+        current_year_col = f'Ventas {self.current_year}'
 
         compras['Meses de Stock'] = compras.apply(
-            lambda row: row['Stock Unidades'] / (row[avg_3y_col] - row[prev_year_col])
-            if (row[avg_3y_col] - row[prev_year_col]) > 0
+            lambda row: row['Disponible Teorico'] / (row[avg_3y_col] - row['Disponible Teorico'] - row[current_year_col])
+            if (row[avg_3y_col] - row['Disponible Teorico'] - row[current_year_col]) > 0
             else 0,
             axis=1
         )
