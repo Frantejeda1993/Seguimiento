@@ -6,6 +6,12 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import sys
+import os
+
+# Asegurar que Python encuentre el módulo
+sys.path.insert(0, os.path.dirname(__file__))
+
 from inventory_manager import InventoryManager
 import io
 import hmac
