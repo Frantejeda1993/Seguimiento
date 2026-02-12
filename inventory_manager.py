@@ -236,7 +236,7 @@ class InventoryManager:
 
         # 3-year adjusted average:
         # (ventas_año_-2 + ventas_año_-1 + ventas_año_actual_anualizadas) / 3
-        current_year_annualized = sales_year * (12 / current_month)
+        current_year_annualized = (sales_year / current_month) * 12 
         sales_3y = (sales_year_minus_2 + sales_prev_year + current_year_annualized) / 3
         df[f'Promedio {current_year - 2} - {current_year}'] = df['SKU'].map(sales_3y).fillna(0)
         
