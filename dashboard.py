@@ -330,6 +330,15 @@ def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -
     return clientes
 
 
+def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
+    """Convert a dataframe to a single-sheet Excel file in memory."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+    output.seek(0)
+    return output.getvalue()
+
+
 def list_upload_dates():
     collection = _get_firebase_collection()
     if collection is not None:
@@ -791,21 +800,21 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                csv_compras = compras_filtered.to_csv(index=False).encode('utf-8')
+                compras_excel = dataframe_to_excel_bytes(compras_filtered, 'COMPRAS')
                 st.download_button(
-                    "📄 Download Purchases (CSV)",
-                    csv_compras,
-                    f"compras_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-                    "text/csv"
+                    "📄 Download Purchases (Excel)",
+                    compras_excel,
+                    f"compras_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             
             with col2:
-                csv_clientes = clientes_df.to_csv(index=False).encode('utf-8')
+                clientes_excel = dataframe_to_excel_bytes(clientes_df, 'CLIENTES')
                 st.download_button(
-                    "📄 Download Customers (CSV)",
-                    csv_clientes,
-                    f"clientes_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
-                    "text/csv"
+                    "📄 Download Customers (Excel)",
+                    clientes_excel,
+                    f"clientes_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
 
