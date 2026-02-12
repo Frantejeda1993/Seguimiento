@@ -153,7 +153,7 @@ class InventoryManager:
         
         # Calculate months of stock
         avg_3y_col = f'Promedio {self.current_year - 2} - {self.current_year}'
-        prev_year_col = f'Promedio {self.current_year - 1}'
+        prev_year_col = f'Ventas {self.current_year - 1}'
 
         compras['Meses de Stock'] = compras.apply(
             lambda row: row['Stock Unidades'] / (row[avg_3y_col] - row[prev_year_col])
@@ -223,16 +223,21 @@ class InventoryManager:
         ].groupby('Artículo')['Unidades Venta'].sum()
         df[f'Ventas {current_year}'] = df['SKU'].map(sales_year).fillna(0)
         
-        # Previous year monthly average
+        # Previous year total sales
         sales_prev_year = ventas_grouped[
             ventas_grouped['Año Factura'] == current_year - 1
-        ].groupby('Artículo')['Unidades Venta'].mean()
-        df[f'Promedio {current_year - 1}'] = df['SKU'].map(sales_prev_year).fillna(0)
-        
-        # 3-year monthly average
-        sales_3y = ventas_grouped[
-            ventas_grouped['Año Factura'].isin([current_year - 2, current_year - 1, current_year])
-        ].groupby('Artículo')['Unidades Venta'].mean()
+        ].groupby('Artículo')['Unidades Venta'].sum()
+        df[f'Ventas {current_year - 1}'] = df['SKU'].map(sales_prev_year).fillna(0)
+
+        # Two years ago total sales
+        sales_year_minus_2 = ventas_grouped[
+            ventas_grouped['Año Factura'] == current_year - 2
+        ].groupby('Artículo')['Unidades Venta'].sum()
+
+        # 3-year adjusted average:
+        # (ventas_año_-2 + ventas_año_-1 + ventas_año_actual_anualizadas) / 3
+        current_year_annualized = sales_year * (12 / current_month)
+        sales_3y = (sales_year_minus_2 + sales_prev_year + current_year_annualized) / 3
         df[f'Promedio {current_year - 2} - {current_year}'] = df['SKU'].map(sales_3y).fillna(0)
         
         return df
