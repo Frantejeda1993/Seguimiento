@@ -56,6 +56,12 @@ st.markdown("""
         padding: 15px;
         border-radius: 10px;
     }
+    /* Keep KPI labels legible on light backgrounds */
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricDelta"] {
+        color: #000000;
+    }
     h1 {
         color: #1f77b4;
     }
@@ -262,7 +268,7 @@ def _save_local_history(history):
     HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
 
 
-def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload"):
+def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", snapshot_name: str | None = None):
     stock_records = _serialize_df(stock_df, "stock")
     ventas_records = _serialize_df(ventas_df, "ventas")
     recepciones_records = _serialize_df(recepciones_df, "recepciones")
@@ -270,6 +276,7 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload"):
     doc_payload = {
         "uploaded_at": datetime.utcnow().isoformat(),
         "source": source,
+        "snapshot_name": (snapshot_name or "").strip() or None,
         "file_count": 2 + int(recepciones_df is not None),
         "stock_chunks": _encode_chunks(stock_records),
         "ventas_chunks": _encode_chunks(ventas_records),
@@ -288,6 +295,39 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload"):
     doc_payload["id"] = snapshot_id
     history.append(doc_payload)
     _save_local_history(history)
+
+
+def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -> pd.DataFrame:
+    """Build customer analysis from a (possibly filtered) sales dataframe."""
+    if ventas_df is None or ventas_df.empty:
+        return pd.DataFrame(columns=["Cod", "Cliente"])
+
+    customers = ventas_df['Cliente'].dropna().unique()
+    clientes = pd.DataFrame({'Cod': customers})
+
+    name_map = ventas_df.groupby('Cliente')['Nombre Cliente'].first()
+    clientes['Cliente'] = clientes['Cod'].map(name_map)
+
+    for year_offset in [2, 1, 0]:
+        year = current_year - year_offset
+        year_sales = ventas_df[
+            ventas_df['Año Factura'] == year
+        ].groupby('Cliente')['Importe Neto'].sum()
+        clientes[f'Año {year}'] = clientes['Cod'].map(year_sales).fillna(0)
+
+    year_cols = [f'Año {current_year - i}' for i in [2, 1, 0]]
+    clientes[f'Dif {current_year - 2} - {current_year - 1}'] = clientes.apply(
+        lambda row: (row[year_cols[1]] - row[year_cols[0]]) / row[year_cols[0]]
+        if row[year_cols[0]] != 0 else 1,
+        axis=1
+    )
+    clientes[f'Dif {current_year - 1} - {current_year}'] = clientes.apply(
+        lambda row: (row[year_cols[2]] - row[year_cols[1]]) / row[year_cols[1]]
+        if row[year_cols[1]] != 0 else 1,
+        axis=1
+    )
+
+    return clientes
 
 
 def list_upload_dates():
@@ -353,6 +393,11 @@ def main():
 
         st.divider()
 
+        snapshot_name = st.text_input(
+            "Nombre para esta carga histórica (opcional)",
+            placeholder="Ej: Stock Febrero 2026"
+        )
+
         st.subheader("🕓 Histórico Firebase")
         try:
             history_items = list_upload_dates()
@@ -370,7 +415,9 @@ def main():
                     formatted_date = uploaded_at
                 source = item.get("source", "upload")
                 file_count = item.get("file_count", 0)
-                label = f"{formatted_date} · {source} · {file_count} archivos"
+                custom_name = item.get("snapshot_name")
+                name_part = f"{custom_name} · " if custom_name else ""
+                label = f"{name_part}{formatted_date} · {source} · {file_count} archivos"
                 history_options[label] = item.get("id")
 
             selected_label = st.selectbox("Seleccionar carga histórica", options=list(history_options.keys()))
@@ -479,7 +526,8 @@ def main():
                                 manager.stock_df,
                                 manager.ventas_df,
                                 manager.recepciones_df,
-                                source="upload"
+                                source="upload",
+                                snapshot_name=snapshot_name
                             )
                         except Exception:
                             st.error("No se pudo conectar a Firebase...")
@@ -521,12 +569,35 @@ def main():
         with st.spinner("Calculating..."):
             try:
                 compras_df = manager.calculate_compras(contemplar_sobre_stock)
-                clientes_df = manager.calculate_clientes()
-                stats = manager.get_summary_stats()
             except Exception as e:
                 st.error(f"Error in calculations: {str(e)}")
                 return
-        
+
+        # Global filters (apply to all tabs)
+        st.subheader("🌐 Filtros globales")
+        available_brands = sorted(compras_df['Marca'].dropna().unique()) if 'Marca' in compras_df.columns else []
+        selected_brand = st.multiselect(
+            "Filtrar por marca (aplica a Dashboard, Purchase Orders, Customers y Export)",
+            options=available_brands,
+            default=[]
+        )
+
+        compras_filtered = compras_df.copy()
+        ventas_filtered = manager.ventas_df.copy() if manager.ventas_df is not None else pd.DataFrame()
+
+        if selected_brand:
+            compras_filtered = compras_filtered[compras_filtered['Marca'].isin(selected_brand)]
+            if not ventas_filtered.empty and 'Clave 1' in ventas_filtered.columns:
+                ventas_filtered = ventas_filtered[ventas_filtered['Clave 1'].isin(selected_brand)]
+
+        clientes_df = calculate_clientes_from_ventas(ventas_filtered, manager.current_year)
+        stats = {
+            'total_stock_value': compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0,
+            'total_pedido_value': compras_filtered['VALOR PEDIDO'].sum() if 'VALOR PEDIDO' in compras_filtered.columns else 0,
+            'total_pedido_margin': compras_filtered['MARGEN PEDIDO'].sum() if 'MARGEN PEDIDO' in compras_filtered.columns else 0,
+            'items_to_order': int((compras_filtered['PEDIDO'] > 0).sum()) if 'PEDIDO' in compras_filtered.columns else 0,
+        }
+
         # Tabs for different sections
         tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🛒 Purchase Orders", "👥 Customers", "📁 Export"])
         
@@ -571,7 +642,7 @@ def main():
             
             with col1:
                 st.subheader("Top 10 Items by Stock Value")
-                top_stock = compras_df.nlargest(10, 'Stock Valor')[['SKU', 'Stock Valor']]
+                top_stock = compras_filtered.nlargest(10, 'Stock Valor')[['SKU', 'Stock Valor']]
                 fig = px.bar(
                     top_stock,
                     x='SKU',
@@ -584,7 +655,7 @@ def main():
             
             with col2:
                 st.subheader("Purchase Orders by Brand")
-                orders_by_brand = compras_df[compras_df['PEDIDO'] > 0].groupby('Marca')['VALOR PEDIDO'].sum().reset_index()
+                orders_by_brand = compras_filtered[compras_filtered['PEDIDO'] > 0].groupby('Marca')['VALOR PEDIDO'].sum().reset_index()
                 fig = px.pie(
                     orders_by_brand,
                     values='VALOR PEDIDO',
@@ -596,7 +667,7 @@ def main():
             
             # Stock status
             st.subheader("Stock Status Distribution")
-            stock_status = compras_df.copy()
+            stock_status = compras_filtered.copy()
             stock_status['Status'] = stock_status.apply(
                 lambda x: 'Critical' if x['Meses de Stock'] < 1 else
                          'Low' if x['Meses de Stock'] < 2 else
@@ -624,26 +695,16 @@ def main():
         with tab2:
             st.header("🛒 Purchase Recommendations")
             
-            # Filters
-            col1, col2, col3 = st.columns(3)
+            # Tab-specific filters
+            col1, col2 = st.columns(2)
             with col1:
-                selected_brand = st.multiselect(
-                    "Filter by Brand",
-                    options=compras_df['Marca'].dropna().unique(),
-                    default=None
-                )
-            
-            with col2:
                 min_order = st.number_input("Min Order Quantity", value=0, step=1)
             
-            with col3:
+            with col2:
                 show_all = st.checkbox("Show All Items", value=False)
             
-            # Filter data
-            filtered_df = compras_df.copy()
-            
-            if selected_brand:
-                filtered_df = filtered_df[filtered_df['Marca'].isin(selected_brand)]
+            # Filter data (already brand-filtered globally)
+            filtered_df = compras_filtered.copy()
             
             if not show_all:
                 filtered_df = filtered_df[filtered_df['PEDIDO'] > min_order]
@@ -711,7 +772,7 @@ def main():
             # Create Excel file in memory
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                compras_df.to_excel(writer, sheet_name='COMPRAS', index=False)
+                compras_filtered.to_excel(writer, sheet_name='COMPRAS', index=False)
                 clientes_df.to_excel(writer, sheet_name='CLIENTES', index=False)
             
             output.seek(0)
@@ -730,7 +791,7 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                csv_compras = compras_df.to_csv(index=False).encode('utf-8')
+                csv_compras = compras_filtered.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     "📄 Download Purchases (CSV)",
                     csv_compras,
