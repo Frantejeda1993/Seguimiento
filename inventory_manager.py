@@ -258,7 +258,7 @@ class InventoryManager:
             ventas_corriente = row[f'Ventas {self.current_year}']
             
             # 3. Get current stock
-            stock_actual = row['Stock Unidades']
+            stock_actual = row['Disponible Teorico']
             
             # 4. Calculate: (promedio - ventas_año - stock) / 12 * meses_compra
             cantidad_base = promedio_total - ventas_corriente - stock_actual
