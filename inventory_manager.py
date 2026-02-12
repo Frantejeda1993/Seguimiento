@@ -238,40 +238,46 @@ class InventoryManager:
         return df
     
     def _calculate_pedido(self, row, contemplar_sobre_stock: bool) -> float:
-    """Calculate the purchase order quantity."""
-    try:
-        # 1. Tomar el promedio 2023-2026
-        promedio_total = row[f'Promedio {self.current_year - 2} - {self.current_year}']
+        """
+        Calculate the purchase order quantity.
         
-        # 2. Restarle las ventas del año corriente
-        ventas_corriente = row[f'Ventas {self.current_year}']
-        
-        # 3. Restarle el stock actual
-        stock_actual = row['Stock Unidades']
-        
-        # 4. Calcular: (promedio - ventas_año - stock) / 12 * meses_compra
-        cantidad_base = promedio_total - ventas_corriente - stock_actual
-        monthly_need = (cantidad_base / 12) * self.meses_compras
-        
-        # 5. Si es negativo y no está activada la opción, retornar 0
-        if monthly_need < 0 and not contemplar_sobre_stock:
-            return 0
-        
-        # 6. Si no debe comprar (tiene estado activo), retornar 0
-        if not row['COMPRAR']:
-            return 0
-        
-        # 7. Redondear: solo arriba si el decimal es >= 0.9
-        decimal_part = abs(monthly_need % 1)
-        if decimal_part >= 0.9:
-            return np.ceil(monthly_need)
-        else:
-            return np.floor(monthly_need)
+        Formula: ((Promedio 2023-2026 - Ventas 2026 - Stock) / 12) * Meses_Compra
+        Round up only if decimal >= 0.9, otherwise round down
+        Return 0 if negative unless contemplar_sobre_stock is True
+        """
+        try:
+            # 1. Get the 3-year average (Promedio 2023-2026)
+            promedio_total = row[f'Promedio {self.current_year - 2} - {self.current_year}']
             
-    except Exception as e:
-        # Para debugging, puedes descomentar esto:
-        # print(f"Error calculando pedido para {row.get('SKU', 'unknown')}: {str(e)}")
-        return 0
+            # 2. Get current year sales (Ventas 2026)
+            ventas_corriente = row[f'Ventas {self.current_year}']
+            
+            # 3. Get current stock
+            stock_actual = row['Stock Unidades']
+            
+            # 4. Calculate: (promedio - ventas_año - stock) / 12 * meses_compra
+            cantidad_base = promedio_total - ventas_corriente - stock_actual
+            monthly_need = (cantidad_base / 12) * self.meses_compras
+            
+            # 5. If negative and contemplar_sobre_stock is False, return 0
+            if monthly_need < 0 and not contemplar_sobre_stock:
+                return 0
+            
+            # 6. If item should not be purchased (has active status), return 0
+            if not row['COMPRAR']:
+                return 0
+            
+            # 7. Round: up only if decimal >= 0.9, otherwise down
+            decimal_part = abs(monthly_need % 1)
+            if decimal_part >= 0.9:
+                return np.ceil(monthly_need)
+            else:
+                return np.floor(monthly_need)
+                
+        except Exception as e:
+            # For debugging - can be uncommented if needed
+            # print(f"Error calculating pedido for {row.get('SKU', 'unknown')}: {str(e)}")
+            return 0
     
     def calculate_clientes(self) -> pd.DataFrame:
         """
