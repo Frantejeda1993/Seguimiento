@@ -3,6 +3,16 @@ Inventory Management Dashboard - Streamlit App
 Interactive web interface for inventory analysis
 """
 
+import sys
+try:
+    from inventory_manager import InventoryManager
+    print("✅ Import exitoso")
+except Exception as e:
+    print(f"❌ Error al importar: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
