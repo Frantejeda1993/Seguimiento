@@ -123,6 +123,40 @@ manager.export_results('output.xlsx')
 
 ---
 
+
+## 🔐 Firebase / Firestore Security Rules
+
+If you store upload logs in Firestore, replace a global deny/allow rule with collection-level rules.
+
+```firestore
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /inventory_uploads/{docId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
+```
+
+### Streamlit Cloud + Firebase Admin SDK
+
+To make writes from Streamlit Cloud valid under authenticated rules:
+
+1. Create a Firebase service account with Firestore permissions.
+2. Add `FIREBASE_SERVICE_ACCOUNT_JSON` to Streamlit secrets as the full JSON object (or JSON string).
+3. The dashboard initializes Firebase Admin SDK with that credential and writes upload metadata to `inventory_uploads`.
+
+Example Streamlit secret:
+
+```toml
+FIREBASE_SERVICE_ACCOUNT_JSON = """{ ... service account json ... }"""
+```
+
+If you do not want end-user auth dependencies, use stricter field validation in rules (for example type checks for `created_at`) and keep write access limited to backend-controlled flows.
+
+---
+
 ## 📁 Input Data Format
 
 The system expects data in the same format as your Excel file:

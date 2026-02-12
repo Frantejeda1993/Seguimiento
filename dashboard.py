@@ -92,6 +92,42 @@ def require_auth() -> bool:
     return False
 
 
+@st.cache_resource
+def get_firestore_client():
+    """Initialize Firebase Admin SDK and return Firestore client.
+
+    Expects `FIREBASE_SERVICE_ACCOUNT_JSON` in Streamlit secrets.
+    """
+    if "FIREBASE_SERVICE_ACCOUNT_JSON" not in st.secrets:
+        return None
+
+    service_account = st.secrets["FIREBASE_SERVICE_ACCOUNT_JSON"]
+    if isinstance(service_account, str):
+        service_account = json.loads(service_account)
+
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(dict(service_account))
+        firebase_admin.initialize_app(cred)
+
+    return firestore.client()
+
+
+def log_inventory_upload(source: str, stock_file, ventas_file, recepciones_file):
+    """Persist upload metadata in Firestore collection `inventory_uploads`."""
+    db = get_firestore_client()
+    if db is None:
+        return
+
+    upload_doc = {
+        "source": source,
+        "stock_filename": stock_file.name if stock_file else None,
+        "ventas_filename": ventas_file.name if ventas_file else None,
+        "recepciones_filename": recepciones_file.name if recepciones_file else None,
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+    db.collection("inventory_uploads").add(upload_doc)
+
+
 @st.cache_data
 def load_sample_data():
     """Generate sample data for demonstration."""
