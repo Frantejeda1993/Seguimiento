@@ -280,27 +280,35 @@ git remote add origin https://github.com/<user>/<repo>.git
 git push -u origin main
 ```
 
-### 2. Add the app password
+### 2. Configure local secrets (not committed)
 
-Create a local secrets file (not committed):
+Copy the template file and set local values:
+
+```bash
+cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+```
+
+Required keys:
 
 ```toml
 APP_PASSWORD = "your-strong-password"
+FIREBASE_SERVICE_ACCOUNT = """{ ...full service account JSON... }"""
 ```
-
-File path:
-
-```
-.streamlit/secrets.toml
-```
-
-An example file is included at `.streamlit/secrets.example.toml`.
 
 ### 3. Deploy on Streamlit Community Cloud
 
 1. Create a new Streamlit app from your GitHub repo.
-2. Set the secret `APP_PASSWORD` in the app Secrets.
-3. Choose `dashboard.py` as the main file.
+2. Open **App settings → Secrets**.
+3. Add:
+   - `APP_PASSWORD`
+   - `FIREBASE_SERVICE_ACCOUNT` (paste the complete JSON).
+4. Choose `dashboard.py` as the main file.
+
+### 4. Security actions (mandatory if exposed)
+
+- Rotate `APP_PASSWORD` immediately if it was committed or shared.
+- Rotate/recreate the Firebase service account private key immediately if exposed.
+- Revoke old credentials after rotating.
 
 ### Notes
 
