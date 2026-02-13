@@ -250,6 +250,9 @@ class InventoryManager:
             """
             Calcula las ventas anualizadas del año actual basándose en el patrón histórico.
             Usa coeficiente de variación (CV) para detectar ventas esporádicas vs regulares.
+            
+            La clave es crear una serie temporal COMPLETA con todos los meses de todos los años,
+            rellenando con 0 los meses sin ventas, para calcular correctamente el CV.
             """
             # Obtener todas las ventas históricas del SKU
             sku_history = ventas_grouped[ventas_grouped['Artículo'] == sku].copy()
@@ -257,44 +260,69 @@ class InventoryManager:
             if len(sku_history) == 0:
                 return 0
             
-            # Obtener ventas del año actual
+            # Obtener ventas de cada año
             current_sales = sales_year.get(sku, 0)
             prev_year_sales = sales_prev_year.get(sku, 0)
             prev_2_year_sales = sales_year_minus_2.get(sku, 0)
             
-            # Si no hay suficiente historial (menos de 12 meses de datos totales)
-            # usar promedio de años anteriores completos
-            if len(sku_history) < 12:
-                # Calcular promedio solo de años con ventas
-                years_with_sales = [prev_2_year_sales, prev_year_sales]
-                valid_years = [y for y in years_with_sales if y > 0]
-                
-                if len(valid_years) > 0:
-                    return np.mean(valid_years)
-                else:
-                    # Si no hay años anteriores, anualizar el actual
-                    if current_month > 0:
-                        return (current_sales / current_month) * 12
-                    return 0
+            # Obtener años con datos históricos
+            years_in_data = sku_history['Año Factura'].unique()
             
-            # CALCULAR CV CORRECTAMENTE: Incluir TODOS los meses (con y sin ventas)
-            # Crear un patrón mensual completo (12 meses) con promedio por mes
+            # Si solo tenemos datos del año actual (sin historial completo)
+            if len(years_in_data) < 2:
+                # No hay suficiente historial, anualizar el año actual
+                if current_month > 0 and current_sales > 0:
+                    return (current_sales / current_month) * 12
+                return 0
             
-            # Paso 1: Calcular ventas promedio por mes a través de todos los años
-            # Agrupar por mes y calcular el promedio (no suma) para normalizar por años
-            monthly_avg = sku_history.groupby('Mes Factura')['Unidades Venta'].mean()
+            # CREAR SERIE TEMPORAL COMPLETA
+            # Para calcular CV correctamente, necesitamos TODOS los meses de TODOS los años
+            # incluyendo los meses sin ventas (=0)
             
-            # Paso 2: Crear array completo de 12 meses (rellenar con 0 los meses sin ventas)
-            monthly_pattern_complete = pd.Series(0.0, index=range(1, 13))
-            monthly_pattern_complete.update(monthly_avg)
+            # Paso 1: Crear un índice completo con todos los meses de todos los años históricos
+            # Solo usamos años anteriores completos (no el año actual que está incompleto)
+            historical_years = [y for y in years_in_data if y < current_year]
             
-            # Paso 3: Calcular coeficiente de variación sobre los 12 meses
-            mean_sales = monthly_pattern_complete.mean()
+            if len(historical_years) == 0:
+                # Solo tenemos año actual, no podemos calcular CV histórico
+                if current_month > 0:
+                    return (current_sales / current_month) * 12
+                return 0
+            
+            # Crear lista de todos los meses para los años históricos
+            all_months_data = []
+            for year in historical_years:
+                for month in range(1, 13):  # Meses 1-12
+                    all_months_data.append({
+                        'Año Factura': year,
+                        'Mes Factura': month
+                    })
+            
+            # Paso 2: Crear DataFrame completo y hacer merge con ventas reales
+            complete_timeline = pd.DataFrame(all_months_data)
+            
+            # Obtener ventas reales solo de años históricos completos
+            historical_sales = sku_history[sku_history['Año Factura'].isin(historical_years)].copy()
+            
+            # Merge: esto dejará NaN en meses sin ventas
+            timeline_with_sales = complete_timeline.merge(
+                historical_sales[['Año Factura', 'Mes Factura', 'Unidades Venta']],
+                on=['Año Factura', 'Mes Factura'],
+                how='left'
+            )
+            
+            # Paso 3: Rellenar NaN con 0 (meses sin ventas)
+            timeline_with_sales['Unidades Venta'] = timeline_with_sales['Unidades Venta'].fillna(0)
+            
+            # Paso 4: Calcular coeficiente de variación sobre la serie completa
+            monthly_sales_series = timeline_with_sales['Unidades Venta']
+            
+            mean_sales = monthly_sales_series.mean()
             
             if mean_sales == 0:
                 return 0
             
-            std_sales = monthly_pattern_complete.std()
+            std_sales = monthly_sales_series.std()
             cv = std_sales / mean_sales
             
             # DECISIÓN BASADA EN CV:
