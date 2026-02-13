@@ -155,23 +155,24 @@ class InventoryManager:
         avg_3y_col = f'Promedio {self.current_year - 2} - {self.current_year}'
         current_year_col = f'Ventas {self.current_year}'
 
-        compras['Meses de Stock'] = compras.apply(
-            lambda row: row['Disponible Teorico'] / (row[avg_3y_col] - row['Disponible Teorico'] - row[current_year_col])
-            if (row[avg_3y_col] - row['Disponible Teorico'] - row[current_year_col]) > 0
-            else 0,
-            axis=1
+        meses_stock_denominator = (
+            compras[avg_3y_col] - compras['Disponible Teorico'] - compras[current_year_col]
+        )
+        compras['Meses de Stock'] = np.where(
+            meses_stock_denominator > 0,
+            compras['Disponible Teorico'] / meses_stock_denominator,
+            0
         )
         
         # Determine if item should be purchased
-        compras['COMPRAR'] = compras.apply(
-            lambda row: True if pd.isna(row['Estado']) else False,
-            axis=1
-        )
+        compras['COMPRAR'] = compras['Estado'].isna()
         
         # Calculate purchase order quantity
-        compras['PEDIDO'] = compras.apply(
-            lambda row: self._calculate_pedido(row, contemplar_sobre_stock),
-            axis=1
+        compras['PEDIDO'] = self._calculate_pedido_vectorized(
+            compras,
+            contemplar_sobre_stock,
+            avg_3y_col,
+            current_year_col,
         )
         
         # Calculate order value and margin
@@ -367,6 +368,33 @@ class InventoryManager:
             # For debugging - can be uncommented if needed
             # print(f"Error calculating pedido for {row.get('SKU', 'unknown')}: {str(e)}")
             return 0
+
+    def _calculate_pedido_vectorized(
+        self,
+        compras: pd.DataFrame,
+        contemplar_sobre_stock: bool,
+        avg_3y_col: str,
+        current_year_col: str,
+    ) -> np.ndarray:
+        """Vectorized purchase order calculation."""
+        promedio_total = compras[avg_3y_col]
+        ventas_corriente = compras[current_year_col]
+        stock_actual = compras['Disponible Teorico']
+
+        cantidad_base = promedio_total - ventas_corriente - stock_actual
+        monthly_need = (cantidad_base / 12) * self.meses_compras
+        monthly_sales_total = (promedio_total / 12) * self.meses_compras
+
+        decimal_part = np.abs(np.mod(monthly_need, 1))
+        rounded_need = np.where(decimal_part >= 0.9, np.ceil(monthly_need), np.floor(monthly_need))
+
+        should_zero = (
+            (stock_actual > monthly_sales_total)
+            | ((monthly_need < 0) & (not contemplar_sobre_stock))
+            | (~compras['COMPRAR'])
+        )
+
+        return np.where(should_zero, 0, rounded_need)
     
     def calculate_clientes(self) -> pd.DataFrame:
         """
