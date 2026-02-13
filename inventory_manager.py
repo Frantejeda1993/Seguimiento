@@ -317,6 +317,14 @@ class InventoryManager:
             df['SKU'].map(sales_prev_year).fillna(0) + 
             annualized_sales
         ) / 3
+
+        # Regla de negocio: si el SKU no vendió ni en el año corriente ni en el
+        # año anterior, no debe contemplarse en el promedio de compra.
+        no_recent_sales_mask = (
+            df['SKU'].map(sales_year).fillna(0).eq(0)
+            & df['SKU'].map(sales_prev_year).fillna(0).eq(0)
+        )
+        sales_3y = sales_3y.where(~no_recent_sales_mask, 0)
         
         df[f'Promedio {current_year - 2} - {current_year}'] = sales_3y
         
