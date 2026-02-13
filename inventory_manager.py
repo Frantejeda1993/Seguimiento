@@ -249,24 +249,12 @@ class InventoryManager:
         # Paso 1: Crear timeline completo para años históricos (solo años anteriores completos)
         historical_years = [current_year - 2, current_year - 1]
         
-        # Crear todas las combinaciones de año-mes para años históricos
-        timeline_rows = []
-        for year in historical_years:
-            for month in range(1, 13):
-                timeline_rows.append({'Año Factura': year, 'Mes Factura': month})
-        
-        # Paso 2: Para cada SKU, crear timeline completo (cross join)
+        # Paso 2: Para cada SKU, crear timeline completo (cross join) de forma vectorizada
         all_skus = df['SKU'].unique()
-        full_timeline = []
-        for sku in all_skus:
-            for row in timeline_rows:
-                full_timeline.append({
-                    'Artículo': sku,
-                    'Año Factura': row['Año Factura'],
-                    'Mes Factura': row['Mes Factura']
-                })
-        
-        timeline_df = pd.DataFrame(full_timeline)
+        timeline_df = pd.MultiIndex.from_product(
+            [all_skus, historical_years, range(1, 13)],
+            names=['Artículo', 'Año Factura', 'Mes Factura']
+        ).to_frame(index=False)
         
         # Paso 3: Merge con ventas históricas reales
         historical_ventas = ventas_grouped[
