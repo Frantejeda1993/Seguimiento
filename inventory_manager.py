@@ -265,8 +265,8 @@ class InventoryManager:
             monthly_need = (cantidad_base / 12) * self.meses_compras
             monthly_sales_total = (promedio_total/12) * self.meses_compras
 
-            # 5. If negative and contemplar_sobre_stock is False, return 0
-            if stock_actual > monthly_sales_total
+            # 5. stock_actual is higer than the monthly_sales_total, return 0
+            if stock_actual > monthly_sales_total:
                 return 0
             
             # 6. If negative and contemplar_sobre_stock is False, return 0
