@@ -182,12 +182,17 @@ class InventoryManager:
         return compras
     
     def _calculate_sales_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate sales metrics for different periods."""
+        """
+        Calculate sales metrics for different periods with improved annualization logic.
+        Uses coefficient of variation to detect seasonal/sporadic vs regular sales patterns.
+        """
         # Group sales by SKU and month/year
         ventas_grouped = self.ventas_df.groupby(['Artículo', 'Año Factura', 'Mes Factura'])['Unidades Venta'].sum().reset_index()
         
         current_year = self.current_year
         current_month = self.current_month
+        
+        # ========== VENTAS MENSUALES RECIENTES ==========
         
         # Sales 2 months ago
         month_m2 = current_month - 2 if current_month > 2 else current_month - 2 + 12
@@ -217,6 +222,8 @@ class InventoryManager:
         df['Ventas -1 mes'] = df['SKU'].map(sales_m1).fillna(0)
         df['Ventas mes'] = df['SKU'].map(sales_current).fillna(0)
         
+        # ========== VENTAS ANUALES ==========
+        
         # Current year total
         sales_year = ventas_grouped[
             ventas_grouped['Año Factura'] == current_year
@@ -233,12 +240,102 @@ class InventoryManager:
         sales_year_minus_2 = ventas_grouped[
             ventas_grouped['Año Factura'] == current_year - 2
         ].groupby('Artículo')['Unidades Venta'].sum()
+        df[f'Ventas {current_year - 2}'] = df['SKU'].map(sales_year_minus_2).fillna(0)
 
-        # 3-year adjusted average:
-        # (ventas_año_-2 + ventas_año_-1 + ventas_año_actual_anualizadas) / 3
-        current_year_annualized = (sales_year / current_month) * 12 
-        sales_3y = (sales_year_minus_2 + sales_prev_year + current_year_annualized) / 3
-        df[f'Promedio {current_year - 2} - {current_year}'] = df['SKU'].map(sales_3y).fillna(0)
+        # ========== PROMEDIO TRIANUAL CON DETECCIÓN DE ESTACIONALIDAD ==========
+        
+        # Calcular patrón de ventas mensual histórico para cada SKU
+        # Esto nos ayudará a detectar si las ventas son regulares o esporádicas
+        def calculate_annualized_sales(sku):
+            """
+            Calcula las ventas anualizadas del año actual basándose en el patrón histórico.
+            Usa coeficiente de variación (CV) para detectar ventas esporádicas vs regulares.
+            """
+            # Obtener todas las ventas históricas del SKU
+            sku_history = ventas_grouped[ventas_grouped['Artículo'] == sku].copy()
+            
+            if len(sku_history) == 0:
+                return 0
+            
+            # Obtener ventas del año actual
+            current_sales = sales_year.get(sku, 0)
+            prev_year_sales = sales_prev_year.get(sku, 0)
+            prev_2_year_sales = sales_year_minus_2.get(sku, 0)
+            
+            # Si no hay suficiente historial (menos de 12 meses de datos totales)
+            # usar promedio de años anteriores completos
+            if len(sku_history) < 12:
+                # Calcular promedio solo de años con ventas
+                years_with_sales = [prev_2_year_sales, prev_year_sales]
+                valid_years = [y for y in years_with_sales if y > 0]
+                
+                if len(valid_years) > 0:
+                    return np.mean(valid_years)
+                else:
+                    # Si no hay años anteriores, anualizar el actual
+                    if current_month > 0:
+                        return (current_sales / current_month) * 12
+                    return 0
+            
+            # CALCULAR CV CORRECTAMENTE: Incluir TODOS los meses (con y sin ventas)
+            # Crear un patrón mensual completo (12 meses) con promedio por mes
+            
+            # Paso 1: Calcular ventas promedio por mes a través de todos los años
+            # Agrupar por mes y calcular el promedio (no suma) para normalizar por años
+            monthly_avg = sku_history.groupby('Mes Factura')['Unidades Venta'].mean()
+            
+            # Paso 2: Crear array completo de 12 meses (rellenar con 0 los meses sin ventas)
+            monthly_pattern_complete = pd.Series(0.0, index=range(1, 13))
+            monthly_pattern_complete.update(monthly_avg)
+            
+            # Paso 3: Calcular coeficiente de variación sobre los 12 meses
+            mean_sales = monthly_pattern_complete.mean()
+            
+            if mean_sales == 0:
+                return 0
+            
+            std_sales = monthly_pattern_complete.std()
+            cv = std_sales / mean_sales
+            
+            # DECISIÓN BASADA EN CV:
+            # CV > 1.5: Alta variabilidad = Ventas esporádicas/estacionales
+            #           -> Usar promedio de años anteriores completos
+            # CV <= 1.5: Baja variabilidad = Ventas regulares
+            #           -> Anualizar el año actual
+            
+            if cv > 1.5:
+                # VENTAS ESPORÁDICAS
+                # Usar promedio de años anteriores completos
+                years_with_sales = [prev_2_year_sales, prev_year_sales]
+                valid_years = [y for y in years_with_sales if y > 0]
+                
+                if len(valid_years) > 0:
+                    avg_historical = np.mean(valid_years)
+                    # Si el año actual ya superó el promedio histórico, usarlo
+                    return max(current_sales, avg_historical)
+                else:
+                    # No hay histórico, anualizar
+                    if current_month > 0:
+                        return (current_sales / current_month) * 12
+                    return 0
+            else:
+                # VENTAS REGULARES
+                # Anualizar el año actual
+                if current_month > 0:
+                    return (current_sales / current_month) * 12
+                return 0
+        
+        # Aplicar la función a cada SKU
+        annualized_sales = df['SKU'].apply(calculate_annualized_sales)
+        
+        # Calcular promedio trianual
+        sales_3y = (
+            df['SKU'].map(sales_year_minus_2).fillna(0) + 
+            df['SKU'].map(sales_prev_year).fillna(0) + 
+            annualized_sales
+        ) / 3
+        
+        df[f'Promedio {current_year - 2} - {current_year}'] = sales_3y
         
         return df
     
