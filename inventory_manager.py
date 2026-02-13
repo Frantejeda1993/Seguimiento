@@ -263,16 +263,21 @@ class InventoryManager:
             # 4. Calculate: (promedio - ventas_año - stock) / 12 * meses_compra
             cantidad_base = promedio_total - ventas_corriente - stock_actual
             monthly_need = (cantidad_base / 12) * self.meses_compras
-            
+            monthly_sales_total = (promedio_total/12) * self.meses_compras
+
             # 5. If negative and contemplar_sobre_stock is False, return 0
+            if stock_actual > monthly_sales_total
+                return 0
+            
+            # 6. If negative and contemplar_sobre_stock is False, return 0
             if monthly_need < 0 and not contemplar_sobre_stock:
                 return 0
             
-            # 6. If item should not be purchased (has active status), return 0
+            # 7. If item should not be purchased (has active status), return 0
             if not row['COMPRAR']:
                 return 0
             
-            # 7. Round: up only if decimal >= 0.9, otherwise down
+            # 8. Round: up only if decimal >= 0.9, otherwise down
             decimal_part = abs(monthly_need % 1)
             if decimal_part >= 0.9:
                 return np.ceil(monthly_need)
