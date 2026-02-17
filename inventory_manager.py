@@ -15,14 +15,14 @@ class InventoryManager:
     Replicates the Excel SEGUIMIENTO functionality.
     """
     
-    def __init__(self, meses_compras: int = 2):
+    def __init__(self, meses_compras: float = 2):
         """
         Initialize the inventory manager.
         
         Args:
             meses_compras: Number of months to calculate purchase recommendations
         """
-        self.meses_compras = meses_compras
+        self.meses_compras = float(meses_compras)
         self.current_month = datetime.now().month
         self.current_year = datetime.now().year
         
@@ -136,10 +136,17 @@ class InventoryManager:
         
         # Pending to receive
         if not self.stock_df.empty:
-            pend_map = self.stock_df.set_index('Artículo')['Pendiente Recibir Compra'].fillna(0).to_dict()
-            fab_map = self.stock_df.set_index('Artículo')['Pendiente Entrar Fabricación'].fillna(0).to_dict()
-            trans_map = self.stock_df.set_index('Artículo')['En Tránsito'].fillna(0).to_dict()
-            compras['Pendiente Recibir'] = compras['SKU'].map(lambda x: pend_map.get(x, 0) + fab_map.get(x, 0) + trans_map.get(x, 0))
+            stock_indexed = self.stock_df.set_index('Artículo')
+            if 'Total Pendiente Recibir' in stock_indexed.columns:
+                total_pend_map = stock_indexed['Total Pendiente Recibir'].fillna(0).to_dict()
+                compras['Pendiente Recibir'] = compras['SKU'].map(total_pend_map).fillna(0)
+            else:
+                pend_map = stock_indexed['Pendiente Recibir Compra'].fillna(0).to_dict()
+                fab_map = stock_indexed['Pendiente Entrar Fabricación'].fillna(0).to_dict()
+                trans_map = stock_indexed['En Tránsito'].fillna(0).to_dict()
+                compras['Pendiente Recibir'] = compras['SKU'].map(
+                    lambda x: pend_map.get(x, 0) + fab_map.get(x, 0) + trans_map.get(x, 0)
+                )
         else:
             compras['Pendiente Recibir'] = 0
         
