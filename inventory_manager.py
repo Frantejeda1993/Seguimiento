@@ -334,7 +334,7 @@ class InventoryManager:
         """
         Calculate the purchase order quantity.
         
-        Formula: ((Promedio 2023-2026 - Ventas 2026 - Stock) / 12) * Meses_Compra
+        Formula: ((Promedio 2023-2026 - Ventas 2026) / 12) * Meses_Compra - Stock
         Round up only if decimal >= 0.9, otherwise round down
         Return 0 if negative unless contemplar_sobre_stock is True
         """
@@ -348,13 +348,14 @@ class InventoryManager:
             # 3. Get current stock
             stock_actual = row['Disponible Teorico']
             
-            # 4. Calculate: (promedio - ventas_año - stock) / 12 * meses_compra
-            cantidad_base = promedio_total - ventas_corriente - stock_actual
-            monthly_need = (cantidad_base / 12) * self.meses_compras
-            monthly_sales_total = (promedio_total/12) * self.meses_compras
+            # 4. Calculate period need first, then discount the current stock.
+            # This ensures stock always reduces the final purchase quantity.
+            cantidad_base = promedio_total - ventas_corriente
+            monthly_sales_total = (cantidad_base / 12) * self.meses_compras
+            monthly_need = monthly_sales_total - stock_actual
 
-            # 5. stock_actual is higer than the monthly_sales_total, return 0
-            if stock_actual > monthly_sales_total:
+            # 5. If stock covers period demand, return 0
+            if stock_actual >= monthly_sales_total:
                 return 0
             
             # 6. If negative and contemplar_sobre_stock is False, return 0
@@ -389,15 +390,15 @@ class InventoryManager:
         ventas_corriente = compras[current_year_col]
         stock_actual = compras['Disponible Teorico']
 
-        cantidad_base = promedio_total - ventas_corriente - stock_actual
-        monthly_need = (cantidad_base / 12) * self.meses_compras
-        monthly_sales_total = (promedio_total / 12) * self.meses_compras
+        cantidad_base = promedio_total - ventas_corriente
+        monthly_sales_total = (cantidad_base / 12) * self.meses_compras
+        monthly_need = monthly_sales_total - stock_actual
 
         decimal_part = np.abs(np.mod(monthly_need, 1))
         rounded_need = np.where(decimal_part >= 0.9, np.ceil(monthly_need), np.floor(monthly_need))
 
         should_zero = (
-            (stock_actual > monthly_sales_total)
+            (stock_actual >= monthly_sales_total)
             | ((monthly_need < 0) & (not contemplar_sobre_stock))
             | (~compras['COMPRAR'])
         )
