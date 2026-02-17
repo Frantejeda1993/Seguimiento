@@ -681,9 +681,16 @@ def main():
         sales_m1_total = ventas_filtered[
             (ventas_filtered['Año Factura'] == year_m1) & (ventas_filtered['Mes Factura'] == month_m1)
         ]['Importe Neto'].sum() if not ventas_filtered.empty else 0
+        sales_m1_last_year_total = ventas_filtered[
+            (ventas_filtered['Año Factura'] == year_m1 - 1) & (ventas_filtered['Mes Factura'] == month_m1)
+        ]['Importe Neto'].sum() if not ventas_filtered.empty else 0
         monthly_growth = (
             (sales_m1_total - sales_m2_total) / sales_m2_total
             if sales_m2_total != 0 else None
+        )
+        yearly_growth = (
+            (sales_m1_total - sales_m1_last_year_total) / sales_m1_last_year_total
+            if sales_m1_last_year_total != 0 else None
         )
         stats = {
             'total_stock_value': compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0,
@@ -735,7 +742,7 @@ def main():
                     help="Expected profit margin from orders"
                 )
 
-            col5, col6 = st.columns(2)
+            col5, col6, col7 = st.columns(3)
             with col5:
                 st.metric(
                     f"Ventas {year_m2}-{month_m2:02d}",
@@ -743,12 +750,19 @@ def main():
                     help="Net sales from 2 months ago"
                 )
             with col6:
-                delta_text = f"{monthly_growth:.1%}" if monthly_growth is not None else "N/A"
+                st.metric(
+                    f"Ventas {year_m1 - 1}-{month_m1:02d}",
+                    f"€{sales_m1_last_year_total:,.0f}",
+                    help="Net sales from the same month last year"
+                )
+            with col7:
+                month_delta_text = f"{monthly_growth:+.1%}" if monthly_growth is not None else "N/A"
+                year_delta_text = f"{yearly_growth:+.1%}" if yearly_growth is not None else "N/A"
                 st.metric(
                     f"Ventas {year_m1}-{month_m1:02d}",
                     f"€{sales_m1_total:,.0f}",
-                    delta=delta_text,
-                    help="Net sales from 1 month ago vs sales from 2 months ago"
+                    delta=f"vs m-2: {month_delta_text} | vs a-1: {year_delta_text}",
+                    help="Net sales from 1 month ago compared to month -2 and same month last year"
                 )
             
             st.divider()
@@ -758,6 +772,7 @@ def main():
             
             with col1:
                 st.subheader("Top 10 Items by Stock Value")
+                st.caption("Muestra los 10 SKU con mayor valor económico en stock según los filtros seleccionados.")
                 top_stock = compras_filtered.nlargest(10, 'Stock Valor')[['SKU', 'Stock Valor']]
                 if top_stock.empty:
                     st.info("No hay datos con los filtros actuales.")
@@ -779,6 +794,7 @@ def main():
             
             with col2:
                 st.subheader("Purchase Orders by Brand")
+                st.caption("Distribución del valor total de compra recomendado por marca para identificar concentración de pedidos.")
                 orders_by_brand = compras_filtered[compras_filtered['PEDIDO'] > 0].groupby('Marca')['VALOR PEDIDO'].sum().reset_index()
                 fig = px.pie(
                     orders_by_brand,
@@ -791,6 +807,7 @@ def main():
             
             # Stock status
             st.subheader("Stock Status Distribution")
+            st.caption("Clasifica los artículos por cobertura de stock (crítico, bajo, normal, alto) según meses disponibles.")
             stock_status = compras_filtered.copy()
             stock_status['Status'] = stock_status.apply(
                 lambda x: 'Critical' if x['Meses de Stock'] < 1 else
