@@ -18,6 +18,7 @@ import hmac
 import json
 import gzip
 import base64
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -227,6 +228,11 @@ def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
         firebase_admin.initialize_app(credentials.Certificate(service_account))
 
     return firestore.client().collection(collection_name)
+
+
+def _normalize_column_name(column_name: str) -> str:
+    """Normalize column names from uploaded files."""
+    return re.sub(r"\s+", " ", str(column_name).strip())
 
 
 def _serialize_df(df: pd.DataFrame | None, kind: str):
@@ -581,10 +587,10 @@ def main():
                                 manager.recepciones_df = pd.read_csv(recepciones_file)
                         
                         # Clean column names
-                        manager.stock_df.columns = manager.stock_df.columns.str.strip().str.replace('\n', ' ')
-                        manager.ventas_df.columns = manager.ventas_df.columns.str.strip()
+                        manager.stock_df.columns = [_normalize_column_name(col) for col in manager.stock_df.columns]
+                        manager.ventas_df.columns = [_normalize_column_name(col) for col in manager.ventas_df.columns]
                         if manager.recepciones_df is not None:
-                            manager.recepciones_df.columns = manager.recepciones_df.columns.str.strip()
+                            manager.recepciones_df.columns = [_normalize_column_name(col) for col in manager.recepciones_df.columns]
                         
                         st.session_state.manager = manager
                         st.session_state.data_loaded = True
@@ -753,15 +759,23 @@ def main():
             with col1:
                 st.subheader("Top 10 Items by Stock Value")
                 top_stock = compras_filtered.nlargest(10, 'Stock Valor')[['SKU', 'Stock Valor']]
-                fig = px.bar(
-                    top_stock,
-                    x='SKU',
-                    y='Stock Valor',
-                    color='Stock Valor',
-                    color_continuous_scale='Blues'
-                )
-                fig.update_layout(showlegend=False, height=400)
-                st.plotly_chart(fig, use_container_width=True)
+                if top_stock.empty:
+                    st.info("No hay datos con los filtros actuales.")
+                else:
+                    max_stock_filtered = float(compras_filtered['Stock Valor'].max()) if not compras_filtered.empty else 0.0
+                    reference_max = max_stock_filtered if max_stock_filtered > 0 else float(top_stock['Stock Valor'].max())
+
+                    fig = px.bar(
+                        top_stock,
+                        x='SKU',
+                        y='Stock Valor',
+                        color='Stock Valor',
+                        color_continuous_scale='Blues',
+                        range_y=[0, reference_max * 1.1 if reference_max > 0 else 1]
+                    )
+                    fig.update_layout(showlegend=False, height=400)
+                    fig.update_coloraxes(cmin=0, cmax=reference_max if reference_max > 0 else 1)
+                    st.plotly_chart(fig, use_container_width=True)
             
             with col2:
                 st.subheader("Purchase Orders by Brand")

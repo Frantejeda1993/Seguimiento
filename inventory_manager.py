@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Dict, Tuple
+import re
 
 
 class InventoryManager:
@@ -60,11 +61,16 @@ class InventoryManager:
         
         # Clean column names
         if self.stock_df is not None:
-            self.stock_df.columns = self.stock_df.columns.str.strip().str.replace('\n', ' ')
+            self.stock_df.columns = [self._normalize_column_name(col) for col in self.stock_df.columns]
         if self.recepciones_df is not None:
-            self.recepciones_df.columns = self.recepciones_df.columns.str.strip()
+            self.recepciones_df.columns = [self._normalize_column_name(col) for col in self.recepciones_df.columns]
         if self.ventas_df is not None:
-            self.ventas_df.columns = self.ventas_df.columns.str.strip()
+            self.ventas_df.columns = [self._normalize_column_name(col) for col in self.ventas_df.columns]
+
+    @staticmethod
+    def _normalize_column_name(column_name: str) -> str:
+        """Normalize input column names removing line breaks and duplicated spaces."""
+        return re.sub(r"\s+", " ", str(column_name).strip())
     
     def calculate_compras(self, contemplar_sobre_stock: bool = False) -> pd.DataFrame:
         """
@@ -137,8 +143,16 @@ class InventoryManager:
         # Pending to receive
         if not self.stock_df.empty:
             stock_indexed = self.stock_df.set_index('Artículo')
-            if 'Total Pendiente Recibir' in stock_indexed.columns:
-                total_pend_map = stock_indexed['Total Pendiente Recibir'].fillna(0).to_dict()
+            pending_receive_column = next(
+                (
+                    col for col in stock_indexed.columns
+                    if self._normalize_column_name(col).casefold() == 'total pendiente recibir'
+                ),
+                None,
+            )
+
+            if pending_receive_column:
+                total_pend_map = stock_indexed[pending_receive_column].fillna(0).to_dict()
                 compras['Pendiente Recibir'] = compras['SKU'].map(total_pend_map).fillna(0)
             else:
                 pend_map = stock_indexed['Pendiente Recibir Compra'].fillna(0).to_dict()
