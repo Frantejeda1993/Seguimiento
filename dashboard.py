@@ -24,6 +24,8 @@ from pathlib import Path
 
 HISTORY_FILE = Path(".upload_history_local.json")
 MAX_CHUNK_SIZE = 700_000
+PRIMARY_UPLOAD_COLLECTION = "upload_history"
+ARCHIVE_UPLOAD_COLLECTION = "upload_history_permanent"
 SNAPSHOT_COLUMNS = {
     "stock": [
         "Artículo", "Descripción", "Situación", "Stock", "Cartera", "Reservas",
@@ -208,7 +210,7 @@ def load_sample_data():
     return pd.DataFrame(stock_data), pd.DataFrame(sales_records), pd.DataFrame(receptions_records)
 
 
-def _get_firebase_collection():
+def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
     """Return Firestore collection when configured, else None."""
     try:
         import firebase_admin
@@ -224,7 +226,7 @@ def _get_firebase_collection():
             service_account = json.loads(service_account)
         firebase_admin.initialize_app(credentials.Certificate(service_account))
 
-    return firestore.client().collection("upload_history")
+    return firestore.client().collection(collection_name)
 
 
 def _serialize_df(df: pd.DataFrame | None, kind: str):
@@ -283,11 +285,14 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
         "recepciones_chunks": _encode_chunks(recepciones_records),
     }
 
-    collection = _get_firebase_collection()
+    collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
     if collection is not None:
         ref = collection.document()
         doc_payload["id"] = ref.id
         ref.set(doc_payload)
+        # Duplicate each snapshot in a permanent collection to avoid accidental
+        # TTL expiration rules applied to the main collection.
+        _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION).document(ref.id).set(doc_payload)
         return
 
     history = _load_local_history()
@@ -340,9 +345,13 @@ def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
 
 
 def list_upload_dates():
-    collection = _get_firebase_collection()
+    # Read from the permanent collection first so historical snapshots are
+    # always available even if the primary collection has a retention policy.
+    collection = _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION)
+    if collection is None:
+        collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
     if collection is not None:
-        docs = collection.order_by("uploaded_at", direction="DESCENDING").limit(50).stream()
+        docs = collection.order_by("uploaded_at", direction="DESCENDING").limit(500).stream()
         return [doc.to_dict() for doc in docs]
 
     history = sorted(_load_local_history(), key=lambda x: x.get("uploaded_at", ""), reverse=True)
@@ -350,9 +359,15 @@ def list_upload_dates():
 
 
 def get_upload_by_id(upload_id: str):
-    collection = _get_firebase_collection()
-    if collection is not None:
-        doc = collection.document(upload_id).get()
+    primary_collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
+    archive_collection = _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION)
+    if archive_collection is not None:
+        doc = archive_collection.document(upload_id).get()
+        if doc.exists:
+            return doc.to_dict()
+
+    if primary_collection is not None:
+        doc = primary_collection.document(upload_id).get()
         if doc.exists:
             return doc.to_dict()
         return None
