@@ -335,6 +335,49 @@ def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -
     return clientes
 
 
+def calculate_clientes_monthly_from_ventas(ventas_df: pd.DataFrame, current_year: int, current_month: int) -> pd.DataFrame:
+    """Build customer analysis comparing the latest 3 months."""
+    if ventas_df is None or ventas_df.empty:
+        return pd.DataFrame(columns=["Cod", "Cliente"])
+
+    customers = ventas_df['Cliente'].dropna().unique()
+    clientes = pd.DataFrame({'Cod': customers})
+
+    name_map = ventas_df.groupby('Cliente')['Nombre Cliente'].first()
+    clientes['Cliente'] = clientes['Cod'].map(name_map)
+
+    month_points = []
+    for offset in [2, 1, 0]:
+        month_value = current_month - offset
+        year_value = current_year
+        if month_value <= 0:
+            month_value += 12
+            year_value -= 1
+        month_points.append((year_value, month_value))
+
+    month_cols = []
+    for year_value, month_value in month_points:
+        col_name = f"Mes {year_value}-{month_value:02d}"
+        month_sales = ventas_df[
+            (ventas_df['Año Factura'] == year_value) & (ventas_df['Mes Factura'] == month_value)
+        ].groupby('Cliente')['Importe Neto'].sum()
+        clientes[col_name] = clientes['Cod'].map(month_sales).fillna(0)
+        month_cols.append(col_name)
+
+    clientes[f'Dif {month_cols[0]} - {month_cols[1]}'] = clientes.apply(
+        lambda row: (row[month_cols[1]] - row[month_cols[0]]) / row[month_cols[0]]
+        if row[month_cols[0]] != 0 else 1,
+        axis=1
+    )
+    clientes[f'Dif {month_cols[1]} - {month_cols[2]}'] = clientes.apply(
+        lambda row: (row[month_cols[2]] - row[month_cols[1]]) / row[month_cols[1]]
+        if row[month_cols[1]] != 0 else 1,
+        axis=1
+    )
+
+    return clientes
+
+
 def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     """Convert a dataframe to a single-sheet Excel file in memory."""
     output = io.BytesIO()
@@ -403,9 +446,10 @@ def main():
         st.subheader("Parameters")
         meses_compras = st.slider(
             "Purchase Months",
-            min_value=1,
-            max_value=6,
-            value=2,
+            min_value=1.0,
+            max_value=6.0,
+            value=2.0,
+            step=0.1,
             help="Number of months to calculate purchase needs"
         )
         
@@ -587,7 +631,7 @@ def main():
     # Main analysis section
     if st.session_state.data_loaded and st.session_state.manager:
         manager = st.session_state.manager
-        manager.meses_compras = meses_compras
+        manager.meses_compras = float(meses_compras)
         
         # Calculate analysis
         with st.spinner("Calculating..."):
@@ -615,6 +659,26 @@ def main():
                 ventas_filtered = ventas_filtered[ventas_filtered['Clave 1'].isin(selected_brand)]
 
         clientes_df = calculate_clientes_from_ventas(ventas_filtered, manager.current_year)
+        clientes_monthly_df = calculate_clientes_monthly_from_ventas(
+            ventas_filtered,
+            manager.current_year,
+            manager.current_month,
+        )
+
+        month_m2 = manager.current_month - 2 if manager.current_month > 2 else manager.current_month - 2 + 12
+        year_m2 = manager.current_year if manager.current_month > 2 else manager.current_year - 1
+        month_m1 = manager.current_month - 1 if manager.current_month > 1 else 12
+        year_m1 = manager.current_year if manager.current_month > 1 else manager.current_year - 1
+        sales_m2_total = ventas_filtered[
+            (ventas_filtered['Año Factura'] == year_m2) & (ventas_filtered['Mes Factura'] == month_m2)
+        ]['Importe Neto'].sum() if not ventas_filtered.empty else 0
+        sales_m1_total = ventas_filtered[
+            (ventas_filtered['Año Factura'] == year_m1) & (ventas_filtered['Mes Factura'] == month_m1)
+        ]['Importe Neto'].sum() if not ventas_filtered.empty else 0
+        monthly_growth = (
+            (sales_m1_total - sales_m2_total) / sales_m2_total
+            if sales_m2_total != 0 else None
+        )
         stats = {
             'total_stock_value': compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0,
             'total_pedido_value': compras_filtered['VALOR PEDIDO'].sum() if 'VALOR PEDIDO' in compras_filtered.columns else 0,
@@ -623,7 +687,13 @@ def main():
         }
 
         # Tabs for different sections
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🛒 Purchase Orders", "👥 Customers", "📁 Export"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📊 Dashboard",
+            "🛒 Purchase Orders",
+            "👥 Customers",
+            "👥 Customers Monthly",
+            "📁 Export"
+        ])
         
         with tab1:
             st.header("📊 Dashboard Overview")
@@ -657,6 +727,22 @@ def main():
                     "Expected Margin",
                     f"€{stats.get('total_pedido_margin', 0):,.0f}",
                     help="Expected profit margin from orders"
+                )
+
+            col5, col6 = st.columns(2)
+            with col5:
+                st.metric(
+                    f"Ventas {year_m2}-{month_m2:02d}",
+                    f"€{sales_m2_total:,.0f}",
+                    help="Net sales from 2 months ago"
+                )
+            with col6:
+                delta_text = f"{monthly_growth:.1%}" if monthly_growth is not None else "N/A"
+                st.metric(
+                    f"Ventas {year_m1}-{month_m1:02d}",
+                    f"€{sales_m1_total:,.0f}",
+                    delta=delta_text,
+                    help="Net sales from 1 month ago vs sales from 2 months ago"
                 )
             
             st.divider()
@@ -789,6 +875,34 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
         
         with tab4:
+            st.header("👥 Customer Monthly Analysis")
+
+            st.dataframe(
+                clientes_monthly_df.style.format({
+                    col: '€{:,.0f}' for col in clientes_monthly_df.columns if col.startswith('Mes ')
+                }).format({
+                    col: '{:.1%}' for col in clientes_monthly_df.columns if 'Dif' in col
+                }),
+                use_container_width=True,
+                height=600
+            )
+
+            st.subheader("Top 10 Customers by Last Month Sales")
+            latest_month_cols = [col for col in clientes_monthly_df.columns if col.startswith('Mes ')]
+            if latest_month_cols:
+                top_col = latest_month_cols[-1]
+                top_customers = clientes_monthly_df.nlargest(10, top_col)
+                fig = px.bar(
+                    top_customers,
+                    x='Cliente',
+                    y=top_col,
+                    color=top_col,
+                    color_continuous_scale='Teal'
+                )
+                fig.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig, use_container_width=True)
+
+        with tab5:
             st.header("📁 Export Results")
             
             st.write("Download your analysis results in Excel format")
@@ -798,6 +912,7 @@ def main():
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 compras_filtered.to_excel(writer, sheet_name='COMPRAS', index=False)
                 clientes_df.to_excel(writer, sheet_name='CLIENTES', index=False)
+                clientes_monthly_df.to_excel(writer, sheet_name='CLIENTES_MENSUAL', index=False)
             
             output.seek(0)
             
@@ -812,7 +927,7 @@ def main():
             st.divider()
             
             # Individual exports
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 compras_excel = dataframe_to_excel_bytes(compras_filtered, 'COMPRAS')
@@ -829,6 +944,15 @@ def main():
                     "📄 Download Customers (Excel)",
                     clientes_excel,
                     f"clientes_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+            with col3:
+                clientes_monthly_excel = dataframe_to_excel_bytes(clientes_monthly_df, 'CLIENTES_MENSUAL')
+                st.download_button(
+                    "📄 Download Customers Monthly (Excel)",
+                    clientes_monthly_excel,
+                    f"clientes_mensual_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
