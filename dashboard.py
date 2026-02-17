@@ -211,6 +211,60 @@ def load_sample_data():
     return pd.DataFrame(stock_data), pd.DataFrame(sales_records), pd.DataFrame(receptions_records)
 
 
+def _format_growth_badge(label: str, growth: float | None) -> str:
+    """Return an HTML line with color and icon according to growth sign."""
+    if growth is None:
+        return f"<div><strong>{label}</strong>: <span style='color:#6b7280;'>⚪ N/A</span></div>"
+
+    is_positive = growth >= 0
+    icon = "🟢 ▲" if is_positive else "🔴 ▼"
+    color = "#16a34a" if is_positive else "#dc2626"
+    return (
+        f"<div><strong>{label}</strong>: "
+        f"<span style='color:{color};font-weight:700;'>{icon} {growth:+.1%}</span></div>"
+    )
+
+
+def _build_last_12_months_sales(ventas_filtered: pd.DataFrame) -> pd.DataFrame:
+    """Build top 10 items by revenue in the latest 12 months available in sales data."""
+    required_cols = {'Artículo', 'Importe Neto', 'Año Factura', 'Mes Factura'}
+    if ventas_filtered.empty or not required_cols.issubset(ventas_filtered.columns):
+        return pd.DataFrame()
+
+    sales = ventas_filtered.copy()
+    sales = sales.dropna(subset=['Artículo', 'Importe Neto', 'Año Factura', 'Mes Factura'])
+    if sales.empty:
+        return pd.DataFrame()
+
+    sales['invoice_month'] = pd.to_datetime(
+        {
+            'year': sales['Año Factura'].astype(int),
+            'month': sales['Mes Factura'].astype(int),
+            'day': 1,
+        },
+        errors='coerce'
+    )
+    sales = sales.dropna(subset=['invoice_month'])
+    if sales.empty:
+        return pd.DataFrame()
+
+    latest_month = sales['invoice_month'].max()
+    period_start = latest_month - pd.DateOffset(months=11)
+
+    sales_last_12m = sales[(sales['invoice_month'] >= period_start) & (sales['invoice_month'] <= latest_month)]
+    if sales_last_12m.empty:
+        return pd.DataFrame()
+
+    top_sales = (
+        sales_last_12m
+        .groupby('Artículo', as_index=False)['Importe Neto']
+        .sum()
+        .rename(columns={'Importe Neto': 'Revenue 12M'})
+        .nlargest(10, 'Revenue 12M')
+    )
+    return top_sales
+
+
 def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
     """Return Firestore collection when configured, else None."""
     try:
@@ -756,13 +810,14 @@ def main():
                     help="Net sales from the same month last year"
                 )
             with col7:
-                month_delta_text = f"{monthly_growth:+.1%}" if monthly_growth is not None else "N/A"
-                year_delta_text = f"{yearly_growth:+.1%}" if yearly_growth is not None else "N/A"
                 st.metric(
                     f"Ventas {year_m1}-{month_m1:02d}",
                     f"€{sales_m1_total:,.0f}",
-                    delta=f"vs m-2: {month_delta_text} | vs a-1: {year_delta_text}",
                     help="Net sales from 1 month ago compared to month -2 and same month last year"
+                )
+                st.markdown(
+                    _format_growth_badge("vs m-2", monthly_growth) + _format_growth_badge("vs a-1", yearly_growth),
+                    unsafe_allow_html=True,
                 )
             
             st.divider()
@@ -771,21 +826,20 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("Top 10 Items by Stock Value")
-                st.caption("Muestra los 10 SKU con mayor valor económico en stock según los filtros seleccionados.")
-                top_stock = compras_filtered.nlargest(10, 'Stock Valor')[['SKU', 'Stock Valor']]
-                if top_stock.empty:
+                st.subheader("Top 10 Items by Sales Last 12 Months")
+                st.caption("Muestra los 10 artículos con más revenue en ventas durante los últimos 12 meses disponibles.")
+                top_sales_12m = _build_last_12_months_sales(ventas_filtered)
+                if top_sales_12m.empty:
                     st.info("No hay datos con los filtros actuales.")
                 else:
-                    max_stock_filtered = float(compras_filtered['Stock Valor'].max()) if not compras_filtered.empty else 0.0
-                    reference_max = max_stock_filtered if max_stock_filtered > 0 else float(top_stock['Stock Valor'].max())
+                    reference_max = float(top_sales_12m['Revenue 12M'].max())
 
                     fig = px.bar(
-                        top_stock,
-                        x='SKU',
-                        y='Stock Valor',
-                        color='Stock Valor',
-                        color_continuous_scale='Blues',
+                        top_sales_12m,
+                        x='Artículo',
+                        y='Revenue 12M',
+                        color='Revenue 12M',
+                        color_continuous_scale='Greens',
                         range_y=[0, reference_max * 1.1 if reference_max > 0 else 1]
                     )
                     fig.update_layout(showlegend=False, height=400)
@@ -807,13 +861,19 @@ def main():
             
             # Stock status
             st.subheader("Stock Status Distribution")
-            st.caption("Clasifica los artículos por cobertura de stock (crítico, bajo, normal, alto) según meses disponibles.")
+            st.caption("Clasifica los artículos por cobertura de stock según meses disponibles: Critical < 1, Low 1-<2, Normal 2-<4, High ≥ 4.")
             stock_status = compras_filtered.copy()
             stock_status['Status'] = stock_status.apply(
                 lambda x: 'Critical' if x['Meses de Stock'] < 1 else
                          'Low' if x['Meses de Stock'] < 2 else
                          'Normal' if x['Meses de Stock'] < 4 else 'High',
                 axis=1
+            )
+            st.markdown(
+                "- 🔴 **Critical**: menos de 1 mes de stock\n"
+                "- 🟠 **Low**: entre 1 y menos de 2 meses\n"
+                "- 🟢 **Normal**: entre 2 y menos de 4 meses\n"
+                "- 🔵 **High**: 4 meses o más"
             )
             status_count = stock_status['Status'].value_counts().reset_index()
             status_count.columns = ['Status', 'Count']
