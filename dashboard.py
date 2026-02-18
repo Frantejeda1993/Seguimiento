@@ -345,15 +345,27 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
         "recepciones_chunks": _encode_chunks(recepciones_records),
     }
 
-    collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
-    if collection is not None:
-        ref = collection.document()
-        doc_payload["id"] = ref.id
-        ref.set(doc_payload)
-        # Duplicate each snapshot in a permanent collection to avoid accidental
-        # TTL expiration rules applied to the main collection.
-        _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION).document(ref.id).set(doc_payload)
-        return
+    primary_collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
+    archive_collection = _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION)
+    if primary_collection is not None or archive_collection is not None:
+        snapshot_id = f"fb-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+
+        if primary_collection is not None:
+            snapshot_id = primary_collection.document().id
+
+        doc_payload["id"] = snapshot_id
+        write_succeeded = False
+
+        if primary_collection is not None:
+            primary_collection.document(snapshot_id).set(doc_payload)
+            write_succeeded = True
+
+        if archive_collection is not None:
+            archive_collection.document(snapshot_id).set(doc_payload)
+            write_succeeded = True
+
+        if write_succeeded:
+            return
 
     history = _load_local_history()
     snapshot_id = f"local-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
@@ -448,14 +460,27 @@ def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
 
 
 def list_upload_dates():
-    # Read from the permanent collection first so historical snapshots are
-    # always available even if the primary collection has a retention policy.
-    collection = _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION)
-    if collection is None:
-        collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
-    if collection is not None:
+    # Read from both collections and merge by id so old and recent snapshots
+    # remain visible even when one collection has a retention policy.
+    history_by_id = {}
+
+    for collection_name in (ARCHIVE_UPLOAD_COLLECTION, PRIMARY_UPLOAD_COLLECTION):
+        collection = _get_firebase_collection(collection_name)
+        if collection is None:
+            continue
+
         docs = collection.order_by("uploaded_at", direction="DESCENDING").limit(500).stream()
-        return [doc.to_dict() for doc in docs]
+        for doc in docs:
+            data = doc.to_dict() or {}
+            data["id"] = data.get("id") or doc.id
+            history_by_id[data["id"]] = data
+
+    if history_by_id:
+        return sorted(
+            history_by_id.values(),
+            key=lambda x: x.get("uploaded_at", ""),
+            reverse=True,
+        )
 
     history = sorted(_load_local_history(), key=lambda x: x.get("uploaded_at", ""), reverse=True)
     return history[:50]
