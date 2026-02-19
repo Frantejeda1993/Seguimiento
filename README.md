@@ -147,6 +147,13 @@ To make writes from Streamlit Cloud valid under authenticated rules:
 2. Add `FIREBASE_SERVICE_ACCOUNT_JSON` to Streamlit secrets as the full JSON object (or JSON string).
 3. The dashboard initializes Firebase Admin SDK with that credential and writes upload metadata to `inventory_uploads`.
 
+### Historical uploads retention (important)
+
+- The dashboard writes snapshots to `upload_history` and `upload_history_permanent`.
+- If your Firebase project has a TTL policy on `upload_history`, old data can disappear there by design.
+- Keep permanent history in `upload_history_permanent` without a TTL policy.
+- Ensure Streamlit secrets include `FIREBASE_SERVICE_ACCOUNT_JSON` (or `FIREBASE_SERVICE_ACCOUNT`) so the app writes to Firestore instead of local fallback storage.
+
 Example Streamlit secret:
 
 ```toml
