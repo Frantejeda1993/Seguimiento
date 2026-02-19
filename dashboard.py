@@ -274,7 +274,10 @@ def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
         return None
 
     if not firebase_admin._apps:
-        service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT")
+        # Backward compatible with both secret names used across this project.
+        service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT") or st.secrets.get(
+            "FIREBASE_SERVICE_ACCOUNT_JSON"
+        )
         if not service_account:
             return None
         if isinstance(service_account, str):
