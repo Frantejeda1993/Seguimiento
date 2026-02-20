@@ -263,6 +263,10 @@ def _set_firebase_status(message: str | None):
     st.session_state["firebase_status"] = message
 
 
+def _format_exception_message(exc: Exception) -> str:
+    return str(exc).strip() or exc.__class__.__name__
+
+
 def _extract_firebase_config():
     """Resolve Firebase service account and optional app settings from Streamlit secrets."""
     service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT") or st.secrets.get(
@@ -394,20 +398,33 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
         write_succeeded = False
         storage_targets = []
 
+        write_errors = []
+
         if primary_collection is not None:
-            primary_collection.document(snapshot_id).set(doc_payload)
-            write_succeeded = True
-            storage_targets.append("temporal")
+            try:
+                primary_collection.document(snapshot_id).set(doc_payload)
+                write_succeeded = True
+                storage_targets.append("temporal")
+            except Exception as exc:
+                write_errors.append(f"upload_history: {_format_exception_message(exc)}")
 
         if archive_collection is not None:
-            archive_collection.document(snapshot_id).set(doc_payload)
-            write_succeeded = True
-            storage_targets.append("permanente")
+            try:
+                archive_collection.document(snapshot_id).set(doc_payload)
+                write_succeeded = True
+                storage_targets.append("permanente")
+            except Exception as exc:
+                write_errors.append(f"upload_history_permanent: {_format_exception_message(exc)}")
 
         if write_succeeded:
             if storage_targets:
                 st.caption(f"💾 Histórico guardado en: {', '.join(storage_targets)}")
+            if write_errors:
+                _set_firebase_status("Errores parciales al guardar en Firebase: " + " | ".join(write_errors))
             return
+
+        if write_errors:
+            _set_firebase_status("No se pudo guardar en Firebase: " + " | ".join(write_errors))
 
     history = _load_local_history()
     snapshot_id = f"local-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
@@ -608,8 +625,9 @@ def main():
         st.subheader("🕓 Histórico Firebase")
         try:
             history_items = list_upload_dates()
-        except Exception:
+        except Exception as exc:
             history_items = _load_local_history()
+            _set_firebase_status(f"Error consultando históricos: {_format_exception_message(exc)}")
             st.error("No se pudo conectar a Firebase...")
 
         firebase_status = st.session_state.get("firebase_status")
@@ -656,7 +674,8 @@ def main():
                         st.session_state.data_loaded = True
                         st.success("✅ Histórico cargado")
                         st.rerun()
-                except Exception:
+                except Exception as exc:
+                    _set_firebase_status(f"Error cargando histórico: {_format_exception_message(exc)}")
                     st.error("No se pudo conectar a Firebase...")
         else:
             st.caption("Sin cargas históricas disponibles")
@@ -747,7 +766,8 @@ def main():
                                 source="upload",
                                 snapshot_name=snapshot_name
                             )
-                        except Exception:
+                        except Exception as exc:
+                            _set_firebase_status(f"Error guardando histórico: {_format_exception_message(exc)}")
                             st.error("No se pudo conectar a Firebase...")
 
                         st.success("✅ Data loaded successfully!")
