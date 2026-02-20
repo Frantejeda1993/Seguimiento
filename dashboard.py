@@ -109,20 +109,14 @@ def require_auth() -> bool:
 
 @st.cache_resource
 def get_firestore_client():
-    """Initialize Firebase Admin SDK and return Firestore client.
-
-    Expects `FIREBASE_SERVICE_ACCOUNT_JSON` in Streamlit secrets.
-    """
-    if "FIREBASE_SERVICE_ACCOUNT_JSON" not in st.secrets:
+    """Initialize Firebase Admin SDK and return Firestore client."""
+    service_account, options, _ = _extract_firebase_config()
+    if not service_account:
         return None
 
-    service_account = st.secrets["FIREBASE_SERVICE_ACCOUNT_JSON"]
-    if isinstance(service_account, str):
-        service_account = json.loads(service_account)
-
     if not firebase_admin._apps:
-        cred = credentials.Certificate(dict(service_account))
-        firebase_admin.initialize_app(cred)
+        cred = credentials.Certificate(service_account)
+        firebase_admin.initialize_app(cred, options=options or None)
 
     return firestore.client()
 
@@ -265,25 +259,69 @@ def _build_last_12_months_sales(ventas_filtered: pd.DataFrame) -> pd.DataFrame:
     return top_sales
 
 
+def _set_firebase_status(message: str | None):
+    st.session_state["firebase_status"] = message
+
+
+def _format_exception_message(exc: Exception) -> str:
+    return str(exc).strip() or exc.__class__.__name__
+
+
+def _extract_firebase_config():
+    """Resolve Firebase service account and optional app settings from Streamlit secrets."""
+    service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT") or st.secrets.get(
+        "FIREBASE_SERVICE_ACCOUNT_JSON"
+    )
+
+    firebase_section = st.secrets.get("firebase")
+    if not service_account and firebase_section:
+        service_account = firebase_section.get("service_account")
+
+    if isinstance(service_account, str):
+        try:
+            service_account = json.loads(service_account)
+        except json.JSONDecodeError:
+            return None, None, "FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido."
+
+    if service_account:
+        service_account = dict(service_account)
+
+    options = {}
+    if firebase_section:
+        database_url = firebase_section.get("databaseURL")
+        if database_url:
+            options["databaseURL"] = database_url
+
+    return service_account, options, None
+
+
 def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
     """Return Firestore collection when configured, else None."""
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
     except Exception:
+        _set_firebase_status("No se pudo importar firebase_admin. Revisa dependencias del entorno.")
         return None
 
     if not firebase_admin._apps:
-        # Backward compatible with both secret names used across this project.
-        service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT") or st.secrets.get(
-            "FIREBASE_SERVICE_ACCOUNT_JSON"
-        )
-        if not service_account:
+        service_account, options, parse_error = _extract_firebase_config()
+        if parse_error:
+            _set_firebase_status(parse_error)
             return None
-        if isinstance(service_account, str):
-            service_account = json.loads(service_account)
-        firebase_admin.initialize_app(credentials.Certificate(service_account))
+        if not service_account:
+            _set_firebase_status(
+                "Falta FIREBASE_SERVICE_ACCOUNT / FIREBASE_SERVICE_ACCOUNT_JSON o [firebase.service_account] en secrets."
+            )
+            return None
 
+        try:
+            firebase_admin.initialize_app(credentials.Certificate(service_account), options=options or None)
+        except Exception as exc:
+            _set_firebase_status(f"No se pudo inicializar Firebase: {exc}")
+            return None
+
+    _set_firebase_status(None)
     return firestore.client().collection(collection_name)
 
 
@@ -358,23 +396,44 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
 
         doc_payload["id"] = snapshot_id
         write_succeeded = False
+        storage_targets = []
+
+        write_errors = []
 
         if primary_collection is not None:
-            primary_collection.document(snapshot_id).set(doc_payload)
-            write_succeeded = True
+            try:
+                primary_collection.document(snapshot_id).set(doc_payload)
+                write_succeeded = True
+                storage_targets.append("temporal")
+            except Exception as exc:
+                write_errors.append(f"upload_history: {_format_exception_message(exc)}")
 
         if archive_collection is not None:
-            archive_collection.document(snapshot_id).set(doc_payload)
-            write_succeeded = True
+            try:
+                archive_collection.document(snapshot_id).set(doc_payload)
+                write_succeeded = True
+                storage_targets.append("permanente")
+            except Exception as exc:
+                write_errors.append(f"upload_history_permanent: {_format_exception_message(exc)}")
 
         if write_succeeded:
+            if storage_targets:
+                st.caption(f"💾 Histórico guardado en: {', '.join(storage_targets)}")
+            if write_errors:
+                _set_firebase_status("Errores parciales al guardar en Firebase: " + " | ".join(write_errors))
             return
+
+        if write_errors:
+            _set_firebase_status("No se pudo guardar en Firebase: " + " | ".join(write_errors))
 
     history = _load_local_history()
     snapshot_id = f"local-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
     doc_payload["id"] = snapshot_id
     history.append(doc_payload)
     _save_local_history(history)
+    firebase_status = st.session_state.get("firebase_status")
+    if firebase_status:
+        st.warning(f"⚠️ Guardado local. Firebase no disponible: {firebase_status}")
 
 
 def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -> pd.DataFrame:
@@ -476,7 +535,16 @@ def list_upload_dates():
         for doc in docs:
             data = doc.to_dict() or {}
             data["id"] = data.get("id") or doc.id
-            history_by_id[data["id"]] = data
+            existing = history_by_id.get(data["id"])
+            if existing is None:
+                data["storage_scope"] = "permanente" if collection_name == ARCHIVE_UPLOAD_COLLECTION else "temporal"
+                history_by_id[data["id"]] = data
+                continue
+
+            storage_scope = existing.get("storage_scope", "")
+            scopes = {s for s in storage_scope.split("+") if s}
+            scopes.add("permanente" if collection_name == ARCHIVE_UPLOAD_COLLECTION else "temporal")
+            existing["storage_scope"] = "+".join(sorted(scopes))
 
     if history_by_id:
         return sorted(
@@ -557,9 +625,14 @@ def main():
         st.subheader("🕓 Histórico Firebase")
         try:
             history_items = list_upload_dates()
-        except Exception:
+        except Exception as exc:
             history_items = _load_local_history()
+            _set_firebase_status(f"Error consultando históricos: {_format_exception_message(exc)}")
             st.error("No se pudo conectar a Firebase...")
+
+        firebase_status = st.session_state.get("firebase_status")
+        if firebase_status:
+            st.caption(f"Estado Firebase: {firebase_status}")
 
         if history_items:
             history_options = {}
@@ -572,8 +645,15 @@ def main():
                 source = item.get("source", "upload")
                 file_count = item.get("file_count", 0)
                 custom_name = item.get("snapshot_name")
+                storage_scope = item.get("storage_scope", "local")
+                storage_label = {
+                    "temporal": "temporal",
+                    "permanente": "permanente",
+                    "permanente+temporal": "temporal + permanente",
+                    "local": "local",
+                }.get(storage_scope, storage_scope)
                 name_part = f"{custom_name} · " if custom_name else ""
-                label = f"{name_part}{formatted_date} · {source} · {file_count} archivos"
+                label = f"{name_part}{formatted_date} · {source} · {file_count} archivos · {storage_label}"
                 history_options[label] = item.get("id")
 
             selected_label = st.selectbox("Seleccionar carga histórica", options=list(history_options.keys()))
@@ -594,7 +674,8 @@ def main():
                         st.session_state.data_loaded = True
                         st.success("✅ Histórico cargado")
                         st.rerun()
-                except Exception:
+                except Exception as exc:
+                    _set_firebase_status(f"Error cargando histórico: {_format_exception_message(exc)}")
                     st.error("No se pudo conectar a Firebase...")
         else:
             st.caption("Sin cargas históricas disponibles")
@@ -685,7 +766,8 @@ def main():
                                 source="upload",
                                 snapshot_name=snapshot_name
                             )
-                        except Exception:
+                        except Exception as exc:
+                            _set_firebase_status(f"Error guardando histórico: {_format_exception_message(exc)}")
                             st.error("No se pudo conectar a Firebase...")
 
                         st.success("✅ Data loaded successfully!")
