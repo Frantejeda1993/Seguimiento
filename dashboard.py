@@ -109,20 +109,14 @@ def require_auth() -> bool:
 
 @st.cache_resource
 def get_firestore_client():
-    """Initialize Firebase Admin SDK and return Firestore client.
-
-    Expects `FIREBASE_SERVICE_ACCOUNT_JSON` in Streamlit secrets.
-    """
-    if "FIREBASE_SERVICE_ACCOUNT_JSON" not in st.secrets:
+    """Initialize Firebase Admin SDK and return Firestore client."""
+    service_account, options, _ = _extract_firebase_config()
+    if not service_account:
         return None
 
-    service_account = st.secrets["FIREBASE_SERVICE_ACCOUNT_JSON"]
-    if isinstance(service_account, str):
-        service_account = json.loads(service_account)
-
     if not firebase_admin._apps:
-        cred = credentials.Certificate(dict(service_account))
-        firebase_admin.initialize_app(cred)
+        cred = credentials.Certificate(service_account)
+        firebase_admin.initialize_app(cred, options=options or None)
 
     return firestore.client()
 
@@ -269,6 +263,34 @@ def _set_firebase_status(message: str | None):
     st.session_state["firebase_status"] = message
 
 
+def _extract_firebase_config():
+    """Resolve Firebase service account and optional app settings from Streamlit secrets."""
+    service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT") or st.secrets.get(
+        "FIREBASE_SERVICE_ACCOUNT_JSON"
+    )
+
+    firebase_section = st.secrets.get("firebase")
+    if not service_account and firebase_section:
+        service_account = firebase_section.get("service_account")
+
+    if isinstance(service_account, str):
+        try:
+            service_account = json.loads(service_account)
+        except json.JSONDecodeError:
+            return None, None, "FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido."
+
+    if service_account:
+        service_account = dict(service_account)
+
+    options = {}
+    if firebase_section:
+        database_url = firebase_section.get("databaseURL")
+        if database_url:
+            options["databaseURL"] = database_url
+
+    return service_account, options, None
+
+
 def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
     """Return Firestore collection when configured, else None."""
     try:
@@ -279,22 +301,18 @@ def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
         return None
 
     if not firebase_admin._apps:
-        # Backward compatible with both secret names used across this project.
-        service_account = st.secrets.get("FIREBASE_SERVICE_ACCOUNT") or st.secrets.get(
-            "FIREBASE_SERVICE_ACCOUNT_JSON"
-        )
-        if not service_account:
-            _set_firebase_status("Falta FIREBASE_SERVICE_ACCOUNT o FIREBASE_SERVICE_ACCOUNT_JSON en secrets.")
+        service_account, options, parse_error = _extract_firebase_config()
+        if parse_error:
+            _set_firebase_status(parse_error)
             return None
-        if isinstance(service_account, str):
-            try:
-                service_account = json.loads(service_account)
-            except json.JSONDecodeError:
-                _set_firebase_status("FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido.")
-                return None
+        if not service_account:
+            _set_firebase_status(
+                "Falta FIREBASE_SERVICE_ACCOUNT / FIREBASE_SERVICE_ACCOUNT_JSON o [firebase.service_account] en secrets."
+            )
+            return None
 
         try:
-            firebase_admin.initialize_app(credentials.Certificate(service_account))
+            firebase_admin.initialize_app(credentials.Certificate(service_account), options=options or None)
         except Exception as exc:
             _set_firebase_status(f"No se pudo inicializar Firebase: {exc}")
             return None
