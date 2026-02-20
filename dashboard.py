@@ -265,12 +265,17 @@ def _build_last_12_months_sales(ventas_filtered: pd.DataFrame) -> pd.DataFrame:
     return top_sales
 
 
+def _set_firebase_status(message: str | None):
+    st.session_state["firebase_status"] = message
+
+
 def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
     """Return Firestore collection when configured, else None."""
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
     except Exception:
+        _set_firebase_status("No se pudo importar firebase_admin. Revisa dependencias del entorno.")
         return None
 
     if not firebase_admin._apps:
@@ -279,11 +284,22 @@ def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
             "FIREBASE_SERVICE_ACCOUNT_JSON"
         )
         if not service_account:
+            _set_firebase_status("Falta FIREBASE_SERVICE_ACCOUNT o FIREBASE_SERVICE_ACCOUNT_JSON en secrets.")
             return None
         if isinstance(service_account, str):
-            service_account = json.loads(service_account)
-        firebase_admin.initialize_app(credentials.Certificate(service_account))
+            try:
+                service_account = json.loads(service_account)
+            except json.JSONDecodeError:
+                _set_firebase_status("FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido.")
+                return None
 
+        try:
+            firebase_admin.initialize_app(credentials.Certificate(service_account))
+        except Exception as exc:
+            _set_firebase_status(f"No se pudo inicializar Firebase: {exc}")
+            return None
+
+    _set_firebase_status(None)
     return firestore.client().collection(collection_name)
 
 
@@ -380,6 +396,9 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
     doc_payload["id"] = snapshot_id
     history.append(doc_payload)
     _save_local_history(history)
+    firebase_status = st.session_state.get("firebase_status")
+    if firebase_status:
+        st.warning(f"⚠️ Guardado local. Firebase no disponible: {firebase_status}")
 
 
 def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -> pd.DataFrame:
@@ -574,6 +593,10 @@ def main():
         except Exception:
             history_items = _load_local_history()
             st.error("No se pudo conectar a Firebase...")
+
+        firebase_status = st.session_state.get("firebase_status")
+        if firebase_status:
+            st.caption(f"Estado Firebase: {firebase_status}")
 
         if history_items:
             history_options = {}
