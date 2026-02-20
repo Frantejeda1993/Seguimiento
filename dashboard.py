@@ -265,12 +265,17 @@ def _build_last_12_months_sales(ventas_filtered: pd.DataFrame) -> pd.DataFrame:
     return top_sales
 
 
+def _set_firebase_status(message: str | None):
+    st.session_state["firebase_status"] = message
+
+
 def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
     """Return Firestore collection when configured, else None."""
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
     except Exception:
+        _set_firebase_status("No se pudo importar firebase_admin. Revisa dependencias del entorno.")
         return None
 
     if not firebase_admin._apps:
@@ -279,11 +284,22 @@ def _get_firebase_collection(collection_name: str = PRIMARY_UPLOAD_COLLECTION):
             "FIREBASE_SERVICE_ACCOUNT_JSON"
         )
         if not service_account:
+            _set_firebase_status("Falta FIREBASE_SERVICE_ACCOUNT o FIREBASE_SERVICE_ACCOUNT_JSON en secrets.")
             return None
         if isinstance(service_account, str):
-            service_account = json.loads(service_account)
-        firebase_admin.initialize_app(credentials.Certificate(service_account))
+            try:
+                service_account = json.loads(service_account)
+            except json.JSONDecodeError:
+                _set_firebase_status("FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido.")
+                return None
 
+        try:
+            firebase_admin.initialize_app(credentials.Certificate(service_account))
+        except Exception as exc:
+            _set_firebase_status(f"No se pudo inicializar Firebase: {exc}")
+            return None
+
+    _set_firebase_status(None)
     return firestore.client().collection(collection_name)
 
 
@@ -358,16 +374,21 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
 
         doc_payload["id"] = snapshot_id
         write_succeeded = False
+        storage_targets = []
 
         if primary_collection is not None:
             primary_collection.document(snapshot_id).set(doc_payload)
             write_succeeded = True
+            storage_targets.append("temporal")
 
         if archive_collection is not None:
             archive_collection.document(snapshot_id).set(doc_payload)
             write_succeeded = True
+            storage_targets.append("permanente")
 
         if write_succeeded:
+            if storage_targets:
+                st.caption(f"💾 Histórico guardado en: {', '.join(storage_targets)}")
             return
 
     history = _load_local_history()
@@ -375,6 +396,9 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
     doc_payload["id"] = snapshot_id
     history.append(doc_payload)
     _save_local_history(history)
+    firebase_status = st.session_state.get("firebase_status")
+    if firebase_status:
+        st.warning(f"⚠️ Guardado local. Firebase no disponible: {firebase_status}")
 
 
 def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -> pd.DataFrame:
@@ -476,7 +500,16 @@ def list_upload_dates():
         for doc in docs:
             data = doc.to_dict() or {}
             data["id"] = data.get("id") or doc.id
-            history_by_id[data["id"]] = data
+            existing = history_by_id.get(data["id"])
+            if existing is None:
+                data["storage_scope"] = "permanente" if collection_name == ARCHIVE_UPLOAD_COLLECTION else "temporal"
+                history_by_id[data["id"]] = data
+                continue
+
+            storage_scope = existing.get("storage_scope", "")
+            scopes = {s for s in storage_scope.split("+") if s}
+            scopes.add("permanente" if collection_name == ARCHIVE_UPLOAD_COLLECTION else "temporal")
+            existing["storage_scope"] = "+".join(sorted(scopes))
 
     if history_by_id:
         return sorted(
@@ -561,6 +594,10 @@ def main():
             history_items = _load_local_history()
             st.error("No se pudo conectar a Firebase...")
 
+        firebase_status = st.session_state.get("firebase_status")
+        if firebase_status:
+            st.caption(f"Estado Firebase: {firebase_status}")
+
         if history_items:
             history_options = {}
             for item in history_items:
@@ -572,8 +609,15 @@ def main():
                 source = item.get("source", "upload")
                 file_count = item.get("file_count", 0)
                 custom_name = item.get("snapshot_name")
+                storage_scope = item.get("storage_scope", "local")
+                storage_label = {
+                    "temporal": "temporal",
+                    "permanente": "permanente",
+                    "permanente+temporal": "temporal + permanente",
+                    "local": "local",
+                }.get(storage_scope, storage_scope)
                 name_part = f"{custom_name} · " if custom_name else ""
-                label = f"{name_part}{formatted_date} · {source} · {file_count} archivos"
+                label = f"{name_part}{formatted_date} · {source} · {file_count} archivos · {storage_label}"
                 history_options[label] = item.get("id")
 
             selected_label = st.selectbox("Seleccionar carga histórica", options=list(history_options.keys()))
