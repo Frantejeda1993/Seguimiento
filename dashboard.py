@@ -358,6 +358,38 @@ def _decode_chunks(chunks):
     return json.loads(raw.decode("utf-8"))
 
 
+def _persist_chunks_to_firestore(doc_ref, field_name: str, chunks: list[str]):
+    """Persist encoded chunks in a Firestore subcollection to avoid 1MB document limit."""
+    if not chunks:
+        return
+
+    for index, chunk in enumerate(chunks):
+        doc_ref.collection("chunks").document(f"{field_name}_{index:04d}").set(
+            {
+                "field": field_name,
+                "index": index,
+                "data": chunk,
+            }
+        )
+
+
+def _load_chunks_from_firestore(doc_ref, field_name: str, chunk_count: int):
+    """Load encoded chunks persisted in Firestore subcollection."""
+    if chunk_count <= 0:
+        return []
+
+    chunks = []
+    for index in range(chunk_count):
+        snapshot = doc_ref.collection("chunks").document(f"{field_name}_{index:04d}").get()
+        if not snapshot.exists:
+            break
+        data = snapshot.to_dict() or {}
+        chunk = data.get("data")
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+
 def _load_local_history():
     if not HISTORY_FILE.exists():
         return []
@@ -375,15 +407,18 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
     stock_records = _serialize_df(stock_df, "stock")
     ventas_records = _serialize_df(ventas_df, "ventas")
     recepciones_records = _serialize_df(recepciones_df, "recepciones")
+    stock_chunks = _encode_chunks(stock_records)
+    ventas_chunks = _encode_chunks(ventas_records)
+    recepciones_chunks = _encode_chunks(recepciones_records)
 
     doc_payload = {
         "uploaded_at": datetime.utcnow().isoformat(),
         "source": source,
         "snapshot_name": (snapshot_name or "").strip() or None,
         "file_count": 2 + int(recepciones_df is not None),
-        "stock_chunks": _encode_chunks(stock_records),
-        "ventas_chunks": _encode_chunks(ventas_records),
-        "recepciones_chunks": _encode_chunks(recepciones_records),
+        "stock_chunk_count": len(stock_chunks),
+        "ventas_chunk_count": len(ventas_chunks),
+        "recepciones_chunk_count": len(recepciones_chunks),
     }
 
     primary_collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
@@ -402,7 +437,11 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
 
         if primary_collection is not None:
             try:
-                primary_collection.document(snapshot_id).set(doc_payload)
+                primary_doc_ref = primary_collection.document(snapshot_id)
+                primary_doc_ref.set(doc_payload)
+                _persist_chunks_to_firestore(primary_doc_ref, "stock", stock_chunks)
+                _persist_chunks_to_firestore(primary_doc_ref, "ventas", ventas_chunks)
+                _persist_chunks_to_firestore(primary_doc_ref, "recepciones", recepciones_chunks)
                 write_succeeded = True
                 storage_targets.append("temporal")
             except Exception as exc:
@@ -410,7 +449,11 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
 
         if archive_collection is not None:
             try:
-                archive_collection.document(snapshot_id).set(doc_payload)
+                archive_doc_ref = archive_collection.document(snapshot_id)
+                archive_doc_ref.set(doc_payload)
+                _persist_chunks_to_firestore(archive_doc_ref, "stock", stock_chunks)
+                _persist_chunks_to_firestore(archive_doc_ref, "ventas", ventas_chunks)
+                _persist_chunks_to_firestore(archive_doc_ref, "recepciones", recepciones_chunks)
                 write_succeeded = True
                 storage_targets.append("permanente")
             except Exception as exc:
@@ -428,6 +471,9 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
 
     history = _load_local_history()
     snapshot_id = f"local-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    doc_payload["stock_chunks"] = stock_chunks
+    doc_payload["ventas_chunks"] = ventas_chunks
+    doc_payload["recepciones_chunks"] = recepciones_chunks
     doc_payload["id"] = snapshot_id
     history.append(doc_payload)
     _save_local_history(history)
@@ -558,17 +604,40 @@ def list_upload_dates():
 
 
 def get_upload_by_id(upload_id: str):
+    def _hydrate_firestore_doc(doc_snapshot):
+        if not doc_snapshot.exists:
+            return None
+
+        data = doc_snapshot.to_dict() or {}
+
+        if "stock_chunks" not in data:
+            stock_count = int(data.get("stock_chunk_count", 0) or 0)
+            ventas_count = int(data.get("ventas_chunk_count", 0) or 0)
+            recepciones_count = int(data.get("recepciones_chunk_count", 0) or 0)
+
+            data["stock_chunks"] = _load_chunks_from_firestore(doc_snapshot.reference, "stock", stock_count)
+            data["ventas_chunks"] = _load_chunks_from_firestore(doc_snapshot.reference, "ventas", ventas_count)
+            data["recepciones_chunks"] = _load_chunks_from_firestore(
+                doc_snapshot.reference,
+                "recepciones",
+                recepciones_count,
+            )
+
+        return data
+
     primary_collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
     archive_collection = _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION)
     if archive_collection is not None:
         doc = archive_collection.document(upload_id).get()
-        if doc.exists:
-            return doc.to_dict()
+        hydrated = _hydrate_firestore_doc(doc)
+        if hydrated is not None:
+            return hydrated
 
     if primary_collection is not None:
         doc = primary_collection.document(upload_id).get()
-        if doc.exists:
-            return doc.to_dict()
+        hydrated = _hydrate_firestore_doc(doc)
+        if hydrated is not None:
+            return hydrated
         return None
 
     history = _load_local_history()
