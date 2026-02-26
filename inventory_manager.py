@@ -10,6 +10,10 @@ from typing import Dict, Tuple
 import re
 
 
+MARGIN_COLUMN = 'CR3: % Margen s/Venta + Transport'
+LEGACY_MARGIN_COLUMN = 'CR2: %Margen s/Venta sin Transporte Athena'
+
+
 class InventoryManager:
     """
     Main class for inventory management calculations.
@@ -106,7 +110,8 @@ class InventoryManager:
         compras['Precio Compra'] = compras['SKU'].map(precio_map)
         
         # Add margin (from ventas)
-        margin_map = self.ventas_df.groupby('Artículo')['CR2: %Margen s/Venta sin Transporte Athena'].mean()
+        margin_column = MARGIN_COLUMN if MARGIN_COLUMN in self.ventas_df.columns else LEGACY_MARGIN_COLUMN
+        margin_map = self.ventas_df.groupby('Artículo')[margin_column].mean()
         compras['Margen'] = compras['SKU'].map(margin_map)
         
         # Add stock status from stock_df
