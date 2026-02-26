@@ -27,6 +27,7 @@ HISTORY_FILE = Path(".upload_history_local.json")
 MAX_CHUNK_SIZE = 700_000
 PRIMARY_UPLOAD_COLLECTION = "upload_history"
 ARCHIVE_UPLOAD_COLLECTION = "upload_history_permanent"
+MARGIN_COLUMN = "CR3: % Margen s/Venta + Transport"
 SNAPSHOT_COLUMNS = {
     "stock": [
         "Artículo", "Descripción", "Situación", "Stock", "Cartera", "Reservas",
@@ -34,7 +35,7 @@ SNAPSHOT_COLUMNS = {
     ],
     "ventas": [
         "Artículo", "Cliente", "Clave 1", "Año Factura", "Nombre Cliente", "Mes Factura",
-        "Descripción Artículo", "Precio Coste", "CR2: %Margen s/Venta sin Transporte Athena",
+        "Descripción Artículo", "Precio Coste", MARGIN_COLUMN,
         "Importe Neto", "Unidades Venta"
     ],
     "recepciones": ["Artículo", "Fecha Recepción", "Unidades Stock", "Precio"],
@@ -187,7 +188,7 @@ def load_sample_data():
             'Stock Disponible': np.random.randint(0, 500),
             'Precio Coste': np.random.uniform(5, 250),
             'Precio Medio Venta': np.random.uniform(10, 500),
-            'CR2: %Margen s/Venta sin Transporte Athena': np.random.uniform(0.1, 0.5),
+            MARGIN_COLUMN: np.random.uniform(0.1, 0.5),
             'Importe Neto': np.random.uniform(50, 5000),
             'Unidades Venta': np.random.randint(1, 50)
         })
