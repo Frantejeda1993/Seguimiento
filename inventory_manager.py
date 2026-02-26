@@ -15,6 +15,7 @@ LEGACY_MARGIN_COLUMN = 'CR2: %Margen s/Venta sin Transporte Athena'
 MARGIN_COLUMN_ALIASES = (
     MARGIN_COLUMN,
     'CR3: %Margen s/Venta + Transport',
+    'CR3: % Margen s/Venta + Transport',
     'CR3:% Margen s/Venta + Transport',
     LEGACY_MARGIN_COLUMN,
     'CR2: % Margen s/Venta sin Transporte Athena',
