@@ -10,6 +10,17 @@ from typing import Dict, Tuple
 import re
 
 
+MARGIN_COLUMN = 'CR3: % Margen s/Venta + Transport'
+LEGACY_MARGIN_COLUMN = 'CR2: %Margen s/Venta sin Transporte Athena'
+MARGIN_COLUMN_ALIASES = (
+    MARGIN_COLUMN,
+    'CR3: %Margen s/Venta + Transport',
+    'CR3:% Margen s/Venta + Transport',
+    LEGACY_MARGIN_COLUMN,
+    'CR2: % Margen s/Venta sin Transporte Athena',
+)
+
+
 class InventoryManager:
     """
     Main class for inventory management calculations.
@@ -72,6 +83,33 @@ class InventoryManager:
         """Normalize input column names removing line breaks and duplicated spaces."""
         return re.sub(r"\s+", " ", str(column_name).strip())
     
+
+    def _resolve_margin_column(self) -> str:
+        """Resolve margin column name allowing legacy labels and spacing variants."""
+        normalized_to_original = {
+            self._normalize_column_name(col).casefold(): col
+            for col in self.ventas_df.columns
+        }
+
+        for alias in MARGIN_COLUMN_ALIASES:
+            normalized_alias = self._normalize_column_name(alias).casefold()
+            if normalized_alias in normalized_to_original:
+                return normalized_to_original[normalized_alias]
+
+        for col in self.ventas_df.columns:
+            normalized_col = self._normalize_column_name(col).casefold()
+            if normalized_col.startswith('cr3:') and 'margen s/venta' in normalized_col:
+                return col
+
+        for col in self.ventas_df.columns:
+            normalized_col = self._normalize_column_name(col).casefold()
+            if normalized_col.startswith('cr2:') and 'margen s/venta' in normalized_col:
+                return col
+
+        raise KeyError(
+            "Column not found for margin percentage. Expected CR3/CR2 margin column variants."
+        )
+
     def calculate_compras(self, contemplar_sobre_stock: bool = False) -> pd.DataFrame:
         """
         Calculate purchase recommendations (COMPRAS sheet).
@@ -106,7 +144,8 @@ class InventoryManager:
         compras['Precio Compra'] = compras['SKU'].map(precio_map)
         
         # Add margin (from ventas)
-        margin_map = self.ventas_df.groupby('Artículo')['CR2: %Margen s/Venta sin Transporte Athena'].mean()
+        margin_column = self._resolve_margin_column()
+        margin_map = self.ventas_df.groupby('Artículo')[margin_column].mean()
         compras['Margen'] = compras['SKU'].map(margin_map)
         
         # Add stock status from stock_df
