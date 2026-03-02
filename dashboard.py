@@ -231,6 +231,9 @@ def _build_last_12_months_top_items(ventas_filtered: pd.DataFrame) -> tuple[pd.D
     if sales.empty:
         return pd.DataFrame(), pd.DataFrame()
 
+    sales['Marca'] = sales['Clave 1'] if 'Clave 1' in sales.columns else ''
+    sales['Descripción'] = sales['Descripción Artículo'] if 'Descripción Artículo' in sales.columns else ''
+
     sales['invoice_month'] = pd.to_datetime(
         {
             'year': sales['Año Factura'].astype(int),
@@ -253,9 +256,19 @@ def _build_last_12_months_top_items(ventas_filtered: pd.DataFrame) -> tuple[pd.D
     grouped_sales = (
         sales_last_12m
         .groupby('Artículo', as_index=False)
-        .agg({'Unidades Venta': 'sum', 'Importe Neto': 'sum'})
+        .agg(
+            {
+                'Marca': lambda x: x.dropna().iloc[0] if not x.dropna().empty else '',
+                'Descripción': lambda x: x.dropna().iloc[0] if not x.dropna().empty else '',
+                'Unidades Venta': 'sum',
+                'Importe Neto': 'sum'
+            }
+        )
         .rename(columns={'Unidades Venta': 'Unidades 12M', 'Importe Neto': 'Ventas 12M'})
     )
+
+    ordered_columns = ['Artículo', 'Marca', 'Descripción', 'Unidades 12M', 'Ventas 12M']
+    grouped_sales = grouped_sales[ordered_columns]
 
     top_units = grouped_sales.nlargest(20, 'Unidades 12M').reset_index(drop=True)
     top_revenue = grouped_sales.nlargest(20, 'Ventas 12M').reset_index(drop=True)
