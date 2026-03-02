@@ -220,16 +220,16 @@ def _format_growth_badge(label: str, growth: float | None) -> str:
     )
 
 
-def _build_last_12_months_sales(ventas_filtered: pd.DataFrame) -> pd.DataFrame:
-    """Build top 10 items by revenue in the latest 12 months available in sales data."""
-    required_cols = {'Artículo', 'Importe Neto', 'Año Factura', 'Mes Factura'}
+def _build_last_12_months_top_items(ventas_filtered: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build top 20 items by units and by revenue in the latest 12 months available."""
+    required_cols = {'Artículo', 'Importe Neto', 'Unidades Venta', 'Año Factura', 'Mes Factura'}
     if ventas_filtered.empty or not required_cols.issubset(ventas_filtered.columns):
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     sales = ventas_filtered.copy()
-    sales = sales.dropna(subset=['Artículo', 'Importe Neto', 'Año Factura', 'Mes Factura'])
+    sales = sales.dropna(subset=['Artículo', 'Importe Neto', 'Unidades Venta', 'Año Factura', 'Mes Factura'])
     if sales.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     sales['invoice_month'] = pd.to_datetime(
         {
@@ -241,23 +241,35 @@ def _build_last_12_months_sales(ventas_filtered: pd.DataFrame) -> pd.DataFrame:
     )
     sales = sales.dropna(subset=['invoice_month'])
     if sales.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     latest_month = sales['invoice_month'].max()
     period_start = latest_month - pd.DateOffset(months=11)
 
     sales_last_12m = sales[(sales['invoice_month'] >= period_start) & (sales['invoice_month'] <= latest_month)]
     if sales_last_12m.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-    top_sales = (
+    grouped_sales = (
         sales_last_12m
-        .groupby('Artículo', as_index=False)['Importe Neto']
-        .sum()
-        .rename(columns={'Importe Neto': 'Revenue 12M'})
-        .nlargest(10, 'Revenue 12M')
+        .groupby('Artículo', as_index=False)
+        .agg({'Unidades Venta': 'sum', 'Importe Neto': 'sum'})
+        .rename(columns={'Unidades Venta': 'Unidades 12M', 'Importe Neto': 'Ventas 12M'})
     )
-    return top_sales
+
+    top_units = grouped_sales.nlargest(20, 'Unidades 12M').reset_index(drop=True)
+    top_revenue = grouped_sales.nlargest(20, 'Ventas 12M').reset_index(drop=True)
+    return top_units, top_revenue
+
+
+def _build_top_items_excel(top_units: pd.DataFrame, top_revenue: pd.DataFrame) -> bytes:
+    """Create an Excel file with top 20 units and top 20 revenue for last 12 months."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        top_units.to_excel(writer, index=False, sheet_name='Top 20 Unidades')
+        top_revenue.to_excel(writer, index=False, sheet_name='Top 20 Ventas')
+    output.seek(0)
+    return output.getvalue()
 
 
 def _set_firebase_status(message: str | None):
@@ -1006,25 +1018,44 @@ def main():
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("Top 10 Items by Sales Last 12 Months")
-                st.caption("Muestra los 10 artículos con más revenue en ventas durante los últimos 12 meses disponibles.")
-                top_sales_12m = _build_last_12_months_sales(ventas_filtered)
-                if top_sales_12m.empty:
+                st.subheader("Top 20 Items últimos 12 meses")
+                st.caption("Listado de los 20 artículos con más unidades vendidas y de los 20 con mayor venta neta en los últimos 12 meses disponibles.")
+                top_units_12m, top_revenue_12m = _build_last_12_months_top_items(ventas_filtered)
+                if top_units_12m.empty and top_revenue_12m.empty:
                     st.info("No hay datos con los filtros actuales.")
                 else:
-                    reference_max = float(top_sales_12m['Revenue 12M'].max())
+                    list_col1, list_col2 = st.columns(2)
+                    with list_col1:
+                        st.markdown("**Top 20 por unidades vendidas**")
+                        st.dataframe(
+                            top_units_12m,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                'Unidades 12M': st.column_config.NumberColumn(format="%.0f"),
+                                'Ventas 12M': st.column_config.NumberColumn(format="€ %.2f"),
+                            }
+                        )
 
-                    fig = px.bar(
-                        top_sales_12m,
-                        x='Artículo',
-                        y='Revenue 12M',
-                        color='Revenue 12M',
-                        color_continuous_scale='Greens',
-                        range_y=[0, reference_max * 1.1 if reference_max > 0 else 1]
+                    with list_col2:
+                        st.markdown("**Top 20 por ventas netas**")
+                        st.dataframe(
+                            top_revenue_12m,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                'Unidades 12M': st.column_config.NumberColumn(format="%.0f"),
+                                'Ventas 12M': st.column_config.NumberColumn(format="€ %.2f"),
+                            }
+                        )
+
+                    excel_data = _build_top_items_excel(top_units_12m, top_revenue_12m)
+                    st.download_button(
+                        label="📥 Descargar Top 20 (Excel)",
+                        data=excel_data,
+                        file_name="top_20_items_ultimos_12_meses.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    fig.update_layout(showlegend=False, height=400)
-                    fig.update_coloraxes(cmin=0, cmax=reference_max if reference_max > 0 else 1)
-                    st.plotly_chart(fig, use_container_width=True)
             
             with col2:
                 st.subheader("Purchase Orders by Brand")
