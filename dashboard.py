@@ -508,6 +508,61 @@ def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", s
         st.warning(f"⚠️ Guardado local. Firebase no disponible: {firebase_status}")
 
 
+
+
+def format_eur(value: float | int | None) -> str:
+    """Format numeric values as EUR with Spanish separators: € 1.234,56."""
+    if value is None or pd.isna(value):
+        value = 0
+    formatted = f"{float(value):,.2f}"
+    formatted = formatted.replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"€ {formatted}"
+
+
+def _resolve_current_year_cutoff(ventas_df: pd.DataFrame, current_year: int) -> datetime | None:
+    """Get latest invoice date in current year to build YoY comparisons to date."""
+    current_year_sales = ventas_df[ventas_df['Año Factura'] == current_year].copy()
+    if current_year_sales.empty:
+        return None
+
+    cutoff_date = None
+    if 'Fecha Factura' in current_year_sales.columns:
+        parsed_dates = pd.to_datetime(current_year_sales['Fecha Factura'], errors='coerce')
+        parsed_dates = parsed_dates.dropna()
+        if not parsed_dates.empty:
+            cutoff_date = parsed_dates.max().to_pydatetime()
+
+    if cutoff_date is None and 'Mes Factura' in current_year_sales.columns:
+        month_series = pd.to_numeric(current_year_sales['Mes Factura'], errors='coerce').dropna()
+        if not month_series.empty:
+            cutoff_month = int(month_series.max())
+            cutoff_date = datetime(current_year, cutoff_month, 1) + pd.offsets.MonthEnd(0)
+            cutoff_date = cutoff_date.to_pydatetime()
+
+    return cutoff_date
+
+
+def _sum_sales_to_cutoff_previous_year(ventas_df: pd.DataFrame, previous_year: int, cutoff_date: datetime | None) -> pd.Series:
+    """Aggregate previous-year sales per customer up to the same month/day as current-year cutoff."""
+    previous_year_sales = ventas_df[ventas_df['Año Factura'] == previous_year].copy()
+    if previous_year_sales.empty:
+        return pd.Series(dtype='float64')
+
+    if cutoff_date is not None and 'Fecha Factura' in previous_year_sales.columns:
+        prev_dates = pd.to_datetime(previous_year_sales['Fecha Factura'], errors='coerce')
+        cutoff_prev = cutoff_date.replace(year=previous_year)
+        valid_mask = prev_dates.notna() & (prev_dates.dt.date <= cutoff_prev.date())
+        previous_year_sales = previous_year_sales[valid_mask]
+    elif cutoff_date is not None and 'Mes Factura' in previous_year_sales.columns:
+        previous_year_sales['Mes Factura'] = pd.to_numeric(previous_year_sales['Mes Factura'], errors='coerce')
+        previous_year_sales = previous_year_sales[previous_year_sales['Mes Factura'] <= cutoff_date.month]
+
+    if previous_year_sales.empty:
+        return pd.Series(dtype='float64')
+
+    return previous_year_sales.groupby('Cliente')['Importe Neto'].sum()
+
+
 def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -> pd.DataFrame:
     """Build customer analysis from a (possibly filtered) sales dataframe."""
     if ventas_df is None or ventas_df.empty:
@@ -532,9 +587,18 @@ def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -
         if row[year_cols[0]] != 0 else 1,
         axis=1
     )
+    cutoff_date = _resolve_current_year_cutoff(ventas_df, current_year)
+    previous_year_to_date_sales = _sum_sales_to_cutoff_previous_year(
+        ventas_df,
+        current_year - 1,
+        cutoff_date,
+    )
+    clientes[f'Año {current_year - 1} (to date)'] = clientes['Cod'].map(previous_year_to_date_sales).fillna(0)
+
+    previous_year_to_date_col = f'Año {current_year - 1} (to date)'
     clientes[f'Dif {current_year - 1} - {current_year}'] = clientes.apply(
-        lambda row: (row[year_cols[2]] - row[year_cols[1]]) / row[year_cols[1]]
-        if row[year_cols[1]] != 0 else 1,
+        lambda row: (row[year_cols[2]] - row[previous_year_to_date_col]) / row[previous_year_to_date_col]
+        if row[previous_year_to_date_col] != 0 else 1,
         axis=1
     )
 
@@ -1054,14 +1118,14 @@ def main():
             with col1:
                 st.metric(
                     "Total Stock Value",
-                    f"€{stats.get('total_stock_value', 0):,.0f}",
+                    format_eur(stats.get('total_stock_value', 0)),
                     help="Total value of current inventory"
                 )
             
             with col2:
                 st.metric(
                     "Purchase Order Value",
-                    f"€{stats.get('total_pedido_value', 0):,.0f}",
+                    format_eur(stats.get('total_pedido_value', 0)),
                     help="Total value of recommended purchases"
                 )
             
@@ -1075,7 +1139,7 @@ def main():
             with col4:
                 st.metric(
                     "Expected Margin",
-                    f"€{stats.get('total_pedido_margin', 0):,.0f}",
+                    format_eur(stats.get('total_pedido_margin', 0)),
                     help="Expected profit margin from orders"
                 )
 
@@ -1085,7 +1149,7 @@ def main():
             with col8:
                 st.metric(
                     "Pendiente de recibir",
-                    f"€{stats.get('pending_receive_value', 0):,.0f}",
+                    format_eur(stats.get('pending_receive_value', 0)),
                     help="Suma de 'Total Pendiente Recibir' * 'Precio Coste' por artículo"
                 )
                 st.caption(f"{stats.get('pending_receive_units', 0):,.0f} unidades")
@@ -1093,21 +1157,21 @@ def main():
             with col9:
                 st.metric(
                     "Pendiente de enviar",
-                    f"€{stats.get('pending_send_value', 0):,.0f}",
+                    format_eur(stats.get('pending_send_value', 0)),
                     help="Suma de 'Cartera' * 'Precio Coste' por artículo"
                 )
                 st.caption(
                     f"{stats.get('pending_send_units', 0):,.0f} uds · "
                     f"Con stock: {stats.get('pending_send_with_stock_units', 0):,.0f} uds "
-                    f"(€{stats.get('pending_send_with_stock_value', 0):,.0f}) · "
+                    f"({format_eur(stats.get('pending_send_with_stock_value', 0))}) · "
                     f"Sin stock: {stats.get('pending_send_no_stock_units', 0):,.0f} uds "
-                    f"(€{stats.get('pending_send_no_stock_value', 0):,.0f})"
+                    f"({format_eur(stats.get('pending_send_no_stock_value', 0))})"
                 )
 
             with col10:
                 st.metric(
                     f"Ventas acumuladas {manager.current_year}",
-                    f"€{stats.get('current_year_sales_total', 0):,.0f}",
+                    format_eur(stats.get('current_year_sales_total', 0)),
                     help="Importe neto acumulado del año actual"
                 )
 
@@ -1115,19 +1179,19 @@ def main():
             with col5:
                 st.metric(
                     f"Ventas {year_m2}-{month_m2:02d}",
-                    f"€{sales_m2_total:,.0f}",
+                    format_eur(sales_m2_total),
                     help="Net sales from 2 months ago"
                 )
             with col6:
                 st.metric(
                     f"Ventas {year_m1 - 1}-{month_m1:02d}",
-                    f"€{sales_m1_last_year_total:,.0f}",
+                    format_eur(sales_m1_last_year_total),
                     help="Net sales from the same month last year"
                 )
             with col7:
                 st.metric(
                     f"Ventas {year_m1}-{month_m1:02d}",
-                    f"€{sales_m1_total:,.0f}",
+                    format_eur(sales_m1_total),
                     help="Net sales from 1 month ago compared to month -2 and same month last year"
                 )
                 st.markdown(
@@ -1150,25 +1214,27 @@ def main():
                     list_col1, list_col2 = st.columns(2)
                     with list_col1:
                         st.markdown("**Top 20 por unidades vendidas**")
+                        top_units_display = top_units_12m.copy()
+                        top_units_display['Ventas 12M'] = top_units_display['Ventas 12M'].map(format_eur)
                         st.dataframe(
-                            top_units_12m,
+                            top_units_display,
                             use_container_width=True,
                             hide_index=True,
                             column_config={
                                 'Unidades 12M': st.column_config.NumberColumn(format="%.0f"),
-                                'Ventas 12M': st.column_config.NumberColumn(format="€ %.2f"),
                             }
                         )
 
                     with list_col2:
                         st.markdown("**Top 20 por ventas netas**")
+                        top_revenue_display = top_revenue_12m.copy()
+                        top_revenue_display['Ventas 12M'] = top_revenue_display['Ventas 12M'].map(format_eur)
                         st.dataframe(
-                            top_revenue_12m,
+                            top_revenue_display,
                             use_container_width=True,
                             hide_index=True,
                             column_config={
                                 'Unidades 12M': st.column_config.NumberColumn(format="%.0f"),
-                                'Ventas 12M': st.column_config.NumberColumn(format="€ %.2f"),
                             }
                         )
 
@@ -1245,20 +1311,17 @@ def main():
                 filtered_df = filtered_df[filtered_df['PEDIDO'] > min_order]
             
             # Display table
-            st.dataframe(
-                filtered_df[[
-                    'SKU', 'Marca', 'Descripción', 'Stock Unidades', 
-                    'Meses de Stock', 'PEDIDO', 'VALOR PEDIDO', 'MARGEN PEDIDO'
-                ]].style.format({
-                    'Stock Unidades': '{:.0f}',
-                    'Meses de Stock': '{:.1f}',
-                    'PEDIDO': '{:.0f}',
-                    'VALOR PEDIDO': '€{:,.2f}',
-                    'MARGEN PEDIDO': '€{:,.2f}'
-                }),
-                use_container_width=True,
-                height=600
-            )
+            purchase_columns = [
+                'SKU', 'Marca', 'Descripción', 'Stock Unidades',
+                'Meses de Stock', 'PEDIDO', 'VALOR PEDIDO', 'MARGEN PEDIDO'
+            ]
+            purchase_display_df = filtered_df[purchase_columns].copy()
+            purchase_display_df['Stock Unidades'] = purchase_display_df['Stock Unidades'].map(lambda v: f"{v:.0f}")
+            purchase_display_df['Meses de Stock'] = purchase_display_df['Meses de Stock'].map(lambda v: f"{v:.1f}")
+            purchase_display_df['PEDIDO'] = purchase_display_df['PEDIDO'].map(lambda v: f"{v:.0f}")
+            purchase_display_df['VALOR PEDIDO'] = purchase_display_df['VALOR PEDIDO'].map(format_eur)
+            purchase_display_df['MARGEN PEDIDO'] = purchase_display_df['MARGEN PEDIDO'].map(format_eur)
+            st.dataframe(purchase_display_df, use_container_width=True, height=600)
             
             # Summary
             st.divider()
@@ -1266,23 +1329,21 @@ def main():
             with col1:
                 st.metric("Filtered Items", len(filtered_df))
             with col2:
-                st.metric("Total Order Value", f"€{filtered_df['VALOR PEDIDO'].sum():,.0f}")
+                st.metric("Total Order Value", format_eur(filtered_df['VALOR PEDIDO'].sum()))
             with col3:
-                st.metric("Total Margin", f"€{filtered_df['MARGEN PEDIDO'].sum():,.0f}")
+                st.metric("Total Margin", format_eur(filtered_df['MARGEN PEDIDO'].sum()))
         
         with tab3:
             st.header("👥 Customer Analysis")
             
             # Display customer table
-            st.dataframe(
-                clientes_df.style.format({
-                    col: '€{:,.0f}' for col in clientes_df.columns if 'Año' in col
-                }).format({
-                    col: '{:.1%}' for col in clientes_df.columns if 'Dif' in col
-                }),
-                use_container_width=True,
-                height=600
-            )
+            clientes_display_df = clientes_df.copy()
+            for col in clientes_display_df.columns:
+                if 'Año' in col:
+                    clientes_display_df[col] = clientes_display_df[col].map(format_eur)
+                if 'Dif' in col:
+                    clientes_display_df[col] = clientes_display_df[col].map(lambda v: f"{v:.1%}")
+            st.dataframe(clientes_display_df, use_container_width=True, height=600)
             
             # Top customers chart
             st.subheader("Top 10 Customers by Current Year Sales")
@@ -1302,15 +1363,13 @@ def main():
         with tab4:
             st.header("👥 Customer Monthly Analysis")
 
-            st.dataframe(
-                clientes_monthly_df.style.format({
-                    col: '€{:,.0f}' for col in clientes_monthly_df.columns if col.startswith('Mes ')
-                }).format({
-                    col: '{:.1%}' for col in clientes_monthly_df.columns if 'Dif' in col
-                }),
-                use_container_width=True,
-                height=600
-            )
+            clientes_monthly_display_df = clientes_monthly_df.copy()
+            for col in clientes_monthly_display_df.columns:
+                if col.startswith('Mes '):
+                    clientes_monthly_display_df[col] = clientes_monthly_display_df[col].map(format_eur)
+                if 'Dif' in col:
+                    clientes_monthly_display_df[col] = clientes_monthly_display_df[col].map(lambda v: f"{v:.1%}")
+            st.dataframe(clientes_monthly_display_df, use_container_width=True, height=600)
 
             st.subheader("Top 10 Customers by Last Month Sales")
             latest_month_cols = [col for col in clientes_monthly_df.columns if col.startswith('Mes ')]
