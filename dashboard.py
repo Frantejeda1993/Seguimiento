@@ -1311,20 +1311,17 @@ def main():
                 filtered_df = filtered_df[filtered_df['PEDIDO'] > min_order]
             
             # Display table
-            st.dataframe(
-                filtered_df[[
-                    'SKU', 'Marca', 'Descripción', 'Stock Unidades', 
-                    'Meses de Stock', 'PEDIDO', 'VALOR PEDIDO', 'MARGEN PEDIDO'
-                ]].style.format({
-                    'Stock Unidades': '{:.0f}',
-                    'Meses de Stock': '{:.1f}',
-                    'PEDIDO': '{:.0f}',
-                    'VALOR PEDIDO': format_eur,
-                    'MARGEN PEDIDO': format_eur
-                }),
-                use_container_width=True,
-                height=600
-            )
+            purchase_columns = [
+                'SKU', 'Marca', 'Descripción', 'Stock Unidades',
+                'Meses de Stock', 'PEDIDO', 'VALOR PEDIDO', 'MARGEN PEDIDO'
+            ]
+            purchase_display_df = filtered_df[purchase_columns].copy()
+            purchase_display_df['Stock Unidades'] = purchase_display_df['Stock Unidades'].map(lambda v: f"{v:.0f}")
+            purchase_display_df['Meses de Stock'] = purchase_display_df['Meses de Stock'].map(lambda v: f"{v:.1f}")
+            purchase_display_df['PEDIDO'] = purchase_display_df['PEDIDO'].map(lambda v: f"{v:.0f}")
+            purchase_display_df['VALOR PEDIDO'] = purchase_display_df['VALOR PEDIDO'].map(format_eur)
+            purchase_display_df['MARGEN PEDIDO'] = purchase_display_df['MARGEN PEDIDO'].map(format_eur)
+            st.dataframe(purchase_display_df, use_container_width=True, height=600)
             
             # Summary
             st.divider()
@@ -1340,15 +1337,13 @@ def main():
             st.header("👥 Customer Analysis")
             
             # Display customer table
-            st.dataframe(
-                clientes_df.style.format({
-                    col: format_eur for col in clientes_df.columns if 'Año' in col
-                }).format({
-                    col: '{:.1%}' for col in clientes_df.columns if 'Dif' in col
-                }),
-                use_container_width=True,
-                height=600
-            )
+            clientes_display_df = clientes_df.copy()
+            for col in clientes_display_df.columns:
+                if 'Año' in col:
+                    clientes_display_df[col] = clientes_display_df[col].map(format_eur)
+                if 'Dif' in col:
+                    clientes_display_df[col] = clientes_display_df[col].map(lambda v: f"{v:.1%}")
+            st.dataframe(clientes_display_df, use_container_width=True, height=600)
             
             # Top customers chart
             st.subheader("Top 10 Customers by Current Year Sales")
@@ -1368,15 +1363,13 @@ def main():
         with tab4:
             st.header("👥 Customer Monthly Analysis")
 
-            st.dataframe(
-                clientes_monthly_df.style.format({
-                    col: format_eur for col in clientes_monthly_df.columns if col.startswith('Mes ')
-                }).format({
-                    col: '{:.1%}' for col in clientes_monthly_df.columns if 'Dif' in col
-                }),
-                use_container_width=True,
-                height=600
-            )
+            clientes_monthly_display_df = clientes_monthly_df.copy()
+            for col in clientes_monthly_display_df.columns:
+                if col.startswith('Mes '):
+                    clientes_monthly_display_df[col] = clientes_monthly_display_df[col].map(format_eur)
+                if 'Dif' in col:
+                    clientes_monthly_display_df[col] = clientes_monthly_display_df[col].map(lambda v: f"{v:.1%}")
+            st.dataframe(clientes_monthly_display_df, use_container_width=True, height=600)
 
             st.subheader("Top 10 Customers by Last Month Sales")
             latest_month_cols = [col for col in clientes_monthly_df.columns if col.startswith('Mes ')]
