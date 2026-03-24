@@ -977,7 +977,22 @@ def main():
 
         if not stock_filtered.empty and 'Artículo' in stock_filtered.columns:
             stock_metrics = stock_filtered.copy()
-            numeric_columns = ['Total Pendiente Recibir', 'Reservas', 'Stock']
+            pending_receive_column = next(
+                (
+                    col for col in stock_metrics.columns
+                    if _normalize_column_name(col).casefold() == 'total pendiente recibir'
+                ),
+                None,
+            )
+            if pending_receive_column is None:
+                pending_receive_column = '__pending_receive__'
+                stock_metrics[pending_receive_column] = (
+                    pd.to_numeric(stock_metrics.get('Pendiente Recibir Compra', 0), errors='coerce').fillna(0)
+                    + pd.to_numeric(stock_metrics.get('Pendiente Entrar Fabricación', 0), errors='coerce').fillna(0)
+                    + pd.to_numeric(stock_metrics.get('En Tránsito', 0), errors='coerce').fillna(0)
+                )
+
+            numeric_columns = [pending_receive_column, 'Cartera', 'Stock']
             for column in numeric_columns:
                 if column not in stock_metrics.columns:
                     stock_metrics[column] = 0
@@ -985,18 +1000,18 @@ def main():
 
             stock_metrics['Precio Coste'] = stock_metrics['Artículo'].map(unit_cost_map).fillna(0)
 
-            pending_receive_units = stock_metrics['Total Pendiente Recibir'].sum()
-            pending_receive_value = (stock_metrics['Total Pendiente Recibir'] * stock_metrics['Precio Coste']).sum()
+            pending_receive_units = stock_metrics[pending_receive_column].sum()
+            pending_receive_value = (stock_metrics[pending_receive_column] * stock_metrics['Precio Coste']).sum()
 
-            stock_metrics['Reservas Sin Stock'] = (stock_metrics['Reservas'] - stock_metrics['Stock']).clip(lower=0)
-            stock_metrics['Reservas Con Stock'] = stock_metrics['Reservas'] - stock_metrics['Reservas Sin Stock']
+            stock_metrics['Cartera Sin Stock'] = (stock_metrics['Cartera'] - stock_metrics['Stock']).clip(lower=0)
+            stock_metrics['Cartera Con Stock'] = stock_metrics['Cartera'] - stock_metrics['Cartera Sin Stock']
 
-            pending_send_units = stock_metrics['Reservas'].sum()
-            pending_send_value = (stock_metrics['Reservas'] * stock_metrics['Precio Coste']).sum()
-            pending_send_no_stock_units = stock_metrics['Reservas Sin Stock'].sum()
-            pending_send_no_stock_value = (stock_metrics['Reservas Sin Stock'] * stock_metrics['Precio Coste']).sum()
-            pending_send_with_stock_units = stock_metrics['Reservas Con Stock'].sum()
-            pending_send_with_stock_value = (stock_metrics['Reservas Con Stock'] * stock_metrics['Precio Coste']).sum()
+            pending_send_units = stock_metrics['Cartera'].sum()
+            pending_send_value = (stock_metrics['Cartera'] * stock_metrics['Precio Coste']).sum()
+            pending_send_no_stock_units = stock_metrics['Cartera Sin Stock'].sum()
+            pending_send_no_stock_value = (stock_metrics['Cartera Sin Stock'] * stock_metrics['Precio Coste']).sum()
+            pending_send_with_stock_units = stock_metrics['Cartera Con Stock'].sum()
+            pending_send_with_stock_value = (stock_metrics['Cartera Con Stock'] * stock_metrics['Precio Coste']).sum()
 
         current_year_sales_total = 0.0
         if not ventas_filtered.empty and {'Año Factura', 'Importe Neto'}.issubset(ventas_filtered.columns):
@@ -1079,7 +1094,7 @@ def main():
                 st.metric(
                     "Pendiente de enviar",
                     f"€{stats.get('pending_send_value', 0):,.0f}",
-                    help="Suma de 'Reservas' * 'Precio Coste' por artículo"
+                    help="Suma de 'Cartera' * 'Precio Coste' por artículo"
                 )
                 st.caption(
                     f"{stats.get('pending_send_units', 0):,.0f} uds · "
