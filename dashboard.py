@@ -917,11 +917,15 @@ def main():
 
         compras_filtered = compras_df.copy()
         ventas_filtered = manager.ventas_df.copy() if manager.ventas_df is not None else pd.DataFrame()
+        stock_filtered = manager.stock_df.copy() if manager.stock_df is not None else pd.DataFrame()
 
         if selected_brand:
             compras_filtered = compras_filtered[compras_filtered['Marca'].isin(selected_brand)]
             if not ventas_filtered.empty and 'Clave 1' in ventas_filtered.columns:
                 ventas_filtered = ventas_filtered[ventas_filtered['Clave 1'].isin(selected_brand)]
+            if not stock_filtered.empty and not ventas_filtered.empty and 'Artículo' in ventas_filtered.columns:
+                selected_articles = set(ventas_filtered['Artículo'].dropna().unique())
+                stock_filtered = stock_filtered[stock_filtered['Artículo'].isin(selected_articles)]
 
         clientes_df = calculate_clientes_from_ventas(ventas_filtered, manager.current_year)
         clientes_monthly_df = calculate_clientes_monthly_from_ventas(
@@ -951,11 +955,85 @@ def main():
             (sales_m1_total - sales_m1_last_year_total) / sales_m1_last_year_total
             if sales_m1_last_year_total != 0 else None
         )
+
+        unit_cost_map = pd.Series(dtype=float)
+        if not ventas_filtered.empty and {'Artículo', 'Precio Coste'}.issubset(ventas_filtered.columns):
+            unit_cost_map = (
+                ventas_filtered[['Artículo', 'Precio Coste']]
+                .dropna(subset=['Artículo'])
+                .assign(**{'Precio Coste': lambda df: pd.to_numeric(df['Precio Coste'], errors='coerce').fillna(0)})
+                .groupby('Artículo')['Precio Coste']
+                .mean()
+            )
+
+        pending_receive_units = 0.0
+        pending_receive_value = 0.0
+        pending_send_units = 0.0
+        pending_send_value = 0.0
+        pending_send_no_stock_units = 0.0
+        pending_send_no_stock_value = 0.0
+        pending_send_with_stock_units = 0.0
+        pending_send_with_stock_value = 0.0
+
+        if not stock_filtered.empty and 'Artículo' in stock_filtered.columns:
+            stock_metrics = stock_filtered.copy()
+            pending_receive_column = next(
+                (
+                    col for col in stock_metrics.columns
+                    if _normalize_column_name(col).casefold() == 'total pendiente recibir'
+                ),
+                None,
+            )
+            if pending_receive_column is None:
+                pending_receive_column = '__pending_receive__'
+                stock_metrics[pending_receive_column] = (
+                    pd.to_numeric(stock_metrics.get('Pendiente Recibir Compra', 0), errors='coerce').fillna(0)
+                    + pd.to_numeric(stock_metrics.get('Pendiente Entrar Fabricación', 0), errors='coerce').fillna(0)
+                    + pd.to_numeric(stock_metrics.get('En Tránsito', 0), errors='coerce').fillna(0)
+                )
+
+            numeric_columns = [pending_receive_column, 'Cartera', 'Stock']
+            for column in numeric_columns:
+                if column not in stock_metrics.columns:
+                    stock_metrics[column] = 0
+                stock_metrics[column] = pd.to_numeric(stock_metrics[column], errors='coerce').fillna(0)
+
+            stock_metrics['Precio Coste'] = stock_metrics['Artículo'].map(unit_cost_map).fillna(0)
+
+            pending_receive_units = stock_metrics[pending_receive_column].sum()
+            pending_receive_value = (stock_metrics[pending_receive_column] * stock_metrics['Precio Coste']).sum()
+
+            stock_metrics['Cartera Sin Stock'] = (stock_metrics['Cartera'] - stock_metrics['Stock']).clip(lower=0)
+            stock_metrics['Cartera Con Stock'] = stock_metrics['Cartera'] - stock_metrics['Cartera Sin Stock']
+
+            pending_send_units = stock_metrics['Cartera'].sum()
+            pending_send_value = (stock_metrics['Cartera'] * stock_metrics['Precio Coste']).sum()
+            pending_send_no_stock_units = stock_metrics['Cartera Sin Stock'].sum()
+            pending_send_no_stock_value = (stock_metrics['Cartera Sin Stock'] * stock_metrics['Precio Coste']).sum()
+            pending_send_with_stock_units = stock_metrics['Cartera Con Stock'].sum()
+            pending_send_with_stock_value = (stock_metrics['Cartera Con Stock'] * stock_metrics['Precio Coste']).sum()
+
+        current_year_sales_total = 0.0
+        if not ventas_filtered.empty and {'Año Factura', 'Importe Neto'}.issubset(ventas_filtered.columns):
+            current_year_sales_total = ventas_filtered.loc[
+                ventas_filtered['Año Factura'] == manager.current_year,
+                'Importe Neto'
+            ].sum()
+
         stats = {
             'total_stock_value': compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0,
             'total_pedido_value': compras_filtered['VALOR PEDIDO'].sum() if 'VALOR PEDIDO' in compras_filtered.columns else 0,
             'total_pedido_margin': compras_filtered['MARGEN PEDIDO'].sum() if 'MARGEN PEDIDO' in compras_filtered.columns else 0,
             'items_to_order': int((compras_filtered['PEDIDO'] > 0).sum()) if 'PEDIDO' in compras_filtered.columns else 0,
+            'pending_receive_units': pending_receive_units,
+            'pending_receive_value': pending_receive_value,
+            'pending_send_units': pending_send_units,
+            'pending_send_value': pending_send_value,
+            'pending_send_no_stock_units': pending_send_no_stock_units,
+            'pending_send_no_stock_value': pending_send_no_stock_value,
+            'pending_send_with_stock_units': pending_send_with_stock_units,
+            'pending_send_with_stock_value': pending_send_with_stock_value,
+            'current_year_sales_total': current_year_sales_total,
         }
 
         # Tabs for different sections
@@ -999,6 +1077,38 @@ def main():
                     "Expected Margin",
                     f"€{stats.get('total_pedido_margin', 0):,.0f}",
                     help="Expected profit margin from orders"
+                )
+
+            st.markdown("### Indicadores operativos")
+            col8, col9, col10 = st.columns(3)
+
+            with col8:
+                st.metric(
+                    "Pendiente de recibir",
+                    f"€{stats.get('pending_receive_value', 0):,.0f}",
+                    help="Suma de 'Total Pendiente Recibir' * 'Precio Coste' por artículo"
+                )
+                st.caption(f"{stats.get('pending_receive_units', 0):,.0f} unidades")
+
+            with col9:
+                st.metric(
+                    "Pendiente de enviar",
+                    f"€{stats.get('pending_send_value', 0):,.0f}",
+                    help="Suma de 'Cartera' * 'Precio Coste' por artículo"
+                )
+                st.caption(
+                    f"{stats.get('pending_send_units', 0):,.0f} uds · "
+                    f"Con stock: {stats.get('pending_send_with_stock_units', 0):,.0f} uds "
+                    f"(€{stats.get('pending_send_with_stock_value', 0):,.0f}) · "
+                    f"Sin stock: {stats.get('pending_send_no_stock_units', 0):,.0f} uds "
+                    f"(€{stats.get('pending_send_no_stock_value', 0):,.0f})"
+                )
+
+            with col10:
+                st.metric(
+                    f"Ventas acumuladas {manager.current_year}",
+                    f"€{stats.get('current_year_sales_total', 0):,.0f}",
+                    help="Importe neto acumulado del año actual"
                 )
 
             col5, col6, col7 = st.columns(3)
