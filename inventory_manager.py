@@ -8,6 +8,7 @@ import numpy as np
 from datetime import datetime
 from typing import Dict, Tuple
 import re
+import unicodedata
 
 
 MARGIN_COLUMN = 'CR3: % Margen s/Venta + Transport'
@@ -92,6 +93,22 @@ class InventoryManager:
     def _normalize_column_name(column_name: str) -> str:
         """Normalize input column names removing line breaks and duplicated spaces."""
         return re.sub(r"\s+", " ", str(column_name).strip())
+
+    @staticmethod
+    def _column_key(column_name: str) -> str:
+        """Return a comparison key for resilient column matching."""
+        normalized = InventoryManager._normalize_column_name(column_name).casefold()
+        normalized = unicodedata.normalize("NFKD", normalized)
+        return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+    def _find_existing_column(self, df: pd.DataFrame, aliases: Tuple[str, ...]) -> str | None:
+        """Find the first matching column in df using accent/spacing/case-insensitive aliases."""
+        key_to_column = {self._column_key(col): col for col in df.columns}
+        for alias in aliases:
+            found = key_to_column.get(self._column_key(alias))
+            if found:
+                return found
+        return None
     
 
     def _resolve_margin_column(self) -> str:
@@ -174,16 +191,24 @@ class InventoryManager:
         
         # Stock units and value
         if self.stock_value_df is not None and not self.stock_value_df.empty:
+            article_col = self._find_existing_column(self.stock_value_df, ('Artículo', 'Articulo'))
+            units_col = self._find_existing_column(self.stock_value_df, ('Unidades',))
+            amount_col = self._find_existing_column(self.stock_value_df, ('Importe',))
+
+            if article_col is None or units_col is None or amount_col is None:
+                article_col = units_col = amount_col = None
+
+        if self.stock_value_df is not None and not self.stock_value_df.empty and article_col and units_col and amount_col:
             stock_value_agg = (
                 self.stock_value_df
-                .groupby('Artículo', as_index=False)
+                .groupby(article_col, as_index=False)
                 .agg({
-                    'Unidades': lambda s: pd.to_numeric(s, errors='coerce').fillna(0).sum(),
-                    'Importe': lambda s: pd.to_numeric(s, errors='coerce').fillna(0).sum(),
+                    units_col: lambda s: pd.to_numeric(s, errors='coerce').fillna(0).sum(),
+                    amount_col: lambda s: pd.to_numeric(s, errors='coerce').fillna(0).sum(),
                 })
             )
-            stock_units_map = stock_value_agg.set_index('Artículo')['Unidades'].to_dict()
-            stock_importe_map = stock_value_agg.set_index('Artículo')['Importe'].to_dict()
+            stock_units_map = stock_value_agg.set_index(article_col)[units_col].to_dict()
+            stock_importe_map = stock_value_agg.set_index(article_col)[amount_col].to_dict()
             compras['Stock Unidades'] = compras['SKU'].map(stock_units_map).fillna(0)
             compras['Stock Valor'] = compras['SKU'].map(stock_importe_map).fillna(0)
         elif not self.stock_df.empty:
