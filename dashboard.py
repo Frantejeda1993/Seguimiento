@@ -861,7 +861,7 @@ def main():
     if data_source == "Upload Files":
         st.header("📤 Upload Data Files")
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             stock_file = st.file_uploader(
@@ -882,6 +882,13 @@ def main():
                 "Receptions Data (Excel/CSV)",
                 type=['xlsx', 'csv'],
                 help="Upload your receptions file"
+            )
+
+        with col4:
+            stock_value_file = st.file_uploader(
+                "Stock Value Data (Excel/CSV)",
+                type=['xlsx', 'csv'],
+                help="Optional: Clave 1, Código Artículo, Unidades, Importe"
             )
         
         if st.button("🚀 Process Data", type="primary"):
@@ -908,11 +915,19 @@ def main():
                             else:
                                 manager.recepciones_df = pd.read_csv(recepciones_file)
                         
+                        if stock_value_file:
+                            if stock_value_file.name.endswith('.xlsx'):
+                                manager.stock_value_df = pd.read_excel(stock_value_file)
+                            else:
+                                manager.stock_value_df = pd.read_csv(stock_value_file)
+                        
                         # Clean column names
                         manager.stock_df.columns = [_normalize_column_name(col) for col in manager.stock_df.columns]
                         manager.ventas_df.columns = [_normalize_column_name(col) for col in manager.ventas_df.columns]
                         if manager.recepciones_df is not None:
                             manager.recepciones_df.columns = [_normalize_column_name(col) for col in manager.recepciones_df.columns]
+                        if manager.stock_value_df is not None:
+                            manager.stock_value_df.columns = [_normalize_column_name(col) for col in manager.stock_value_df.columns]
                         
                         st.session_state.manager = manager
                         st.session_state.data_loaded = True
