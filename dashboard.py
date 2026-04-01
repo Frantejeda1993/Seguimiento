@@ -375,9 +375,18 @@ def _calculate_total_stock_value(manager: InventoryManager, compras_filtered: pd
         return compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0.0
 
     stock_value_data = manager.stock_value_df.copy()
+    article_col = _find_existing_column(
+        stock_value_data,
+        ('Código Artículo', 'Codigo Articulo', 'Artículo', 'Articulo')
+    )
     amount_col = _find_existing_column(stock_value_data, ('Importe',))
-    if not amount_col:
+    if not amount_col or not article_col:
         return compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0.0
+
+    stock_value_data = stock_value_data[
+        stock_value_data[article_col].notna()
+        & stock_value_data[article_col].astype(str).str.strip().ne('')
+    ]
 
     if selected_brand:
         brand_col = _find_existing_column(stock_value_data, ('Clave 1', 'Marca'))
