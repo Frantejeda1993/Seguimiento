@@ -356,6 +356,37 @@ def _normalize_column_name(column_name: str) -> str:
     return re.sub(r"\s+", " ", str(column_name).strip())
 
 
+def _find_existing_column(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
+    """Return the first matching column from aliases using normalized names."""
+    normalized_to_original = {
+        _normalize_column_name(col).casefold(): col
+        for col in df.columns
+    }
+    for alias in aliases:
+        match = normalized_to_original.get(_normalize_column_name(alias).casefold())
+        if match:
+            return match
+    return None
+
+
+def _calculate_total_stock_value(manager: InventoryManager, compras_filtered: pd.DataFrame, selected_brand: list[str]) -> float:
+    """Calculate total stock value prioritizing the dedicated stock value input."""
+    if manager.stock_value_df is None or manager.stock_value_df.empty:
+        return compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0.0
+
+    stock_value_data = manager.stock_value_df.copy()
+    amount_col = _find_existing_column(stock_value_data, ('Importe',))
+    if not amount_col:
+        return compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0.0
+
+    if selected_brand:
+        brand_col = _find_existing_column(stock_value_data, ('Clave 1', 'Marca'))
+        if brand_col:
+            stock_value_data = stock_value_data[stock_value_data[brand_col].isin(selected_brand)]
+
+    return pd.to_numeric(stock_value_data[amount_col], errors='coerce').fillna(0).sum()
+
+
 def _serialize_df(df: pd.DataFrame | None, kind: str):
     if df is None:
         return []
@@ -1120,7 +1151,7 @@ def main():
             ].sum()
 
         stats = {
-            'total_stock_value': compras_filtered['Stock Valor'].sum() if 'Stock Valor' in compras_filtered.columns else 0,
+            'total_stock_value': _calculate_total_stock_value(manager, compras_filtered, selected_brand),
             'total_pedido_value': compras_filtered['VALOR PEDIDO'].sum() if 'VALOR PEDIDO' in compras_filtered.columns else 0,
             'total_pedido_margin': compras_filtered['MARGEN PEDIDO'].sum() if 'MARGEN PEDIDO' in compras_filtered.columns else 0,
             'items_to_order': int((compras_filtered['PEDIDO'] > 0).sum()) if 'PEDIDO' in compras_filtered.columns else 0,
