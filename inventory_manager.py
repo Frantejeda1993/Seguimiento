@@ -43,11 +43,12 @@ class InventoryManager:
         self.stock_df = None
         self.recepciones_df = None
         self.ventas_df = None
+        self.stock_value_df = None
         self.compras_df = None
         self.clientes_df = None
     
-    def load_data(self, stock_file: str = None, recepciones_file: str = None, 
-                  ventas_file: str = None, excel_file: str = None):
+    def load_data(self, stock_file: str = None, recepciones_file: str = None,
+                  ventas_file: str = None, stock_value_file: str = None, excel_file: str = None):
         """
         Load data from CSV files or Excel sheets.
         
@@ -62,6 +63,10 @@ class InventoryManager:
             self.stock_df = pd.read_excel(excel_file, sheet_name='1 - INPUT Stock')
             self.recepciones_df = pd.read_excel(excel_file, sheet_name='2 - INPUT Recepciones')
             self.ventas_df = pd.read_excel(excel_file, sheet_name='3 - INPUT Ventas')
+            try:
+                self.stock_value_df = pd.read_excel(excel_file, sheet_name='Stock_Value')
+            except ValueError:
+                self.stock_value_df = None
         else:
             # Load from CSV files
             if stock_file:
@@ -70,6 +75,8 @@ class InventoryManager:
                 self.recepciones_df = pd.read_csv(recepciones_file)
             if ventas_file:
                 self.ventas_df = pd.read_csv(ventas_file)
+            if stock_value_file:
+                self.stock_value_df = pd.read_csv(stock_value_file)
         
         # Clean column names
         if self.stock_df is not None:
@@ -78,6 +85,8 @@ class InventoryManager:
             self.recepciones_df.columns = [self._normalize_column_name(col) for col in self.recepciones_df.columns]
         if self.ventas_df is not None:
             self.ventas_df.columns = [self._normalize_column_name(col) for col in self.ventas_df.columns]
+        if self.stock_value_df is not None:
+            self.stock_value_df.columns = [self._normalize_column_name(col) for col in self.stock_value_df.columns]
 
     @staticmethod
     def _normalize_column_name(column_name: str) -> str:
@@ -164,13 +173,26 @@ class InventoryManager:
             compras['Ultima recepción'] = None
         
         # Stock units and value
-        if not self.stock_df.empty:
+        if self.stock_value_df is not None and not self.stock_value_df.empty:
+            stock_value_agg = (
+                self.stock_value_df
+                .groupby('Artículo', as_index=False)
+                .agg({
+                    'Unidades': lambda s: pd.to_numeric(s, errors='coerce').fillna(0).sum(),
+                    'Importe': lambda s: pd.to_numeric(s, errors='coerce').fillna(0).sum(),
+                })
+            )
+            stock_units_map = stock_value_agg.set_index('Artículo')['Unidades'].to_dict()
+            stock_importe_map = stock_value_agg.set_index('Artículo')['Importe'].to_dict()
+            compras['Stock Unidades'] = compras['SKU'].map(stock_units_map).fillna(0)
+            compras['Stock Valor'] = compras['SKU'].map(stock_importe_map).fillna(0)
+        elif not self.stock_df.empty:
             stock_units_map = self.stock_df.set_index('Artículo')['Stock'].to_dict()
             compras['Stock Unidades'] = compras['SKU'].map(stock_units_map).fillna(0)
+            compras['Stock Valor'] = compras['Stock Unidades'] * compras['Precio Compra']
         else:
             compras['Stock Unidades'] = 0
-        
-        compras['Stock Valor'] = compras['Stock Unidades'] * compras['Precio Compra']
+            compras['Stock Valor'] = 0
         
         # Pending to serve (Cartera + Reservas)
         if not self.stock_df.empty:
