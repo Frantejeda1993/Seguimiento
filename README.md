@@ -193,6 +193,18 @@ The system expects data in the same format as your Excel file:
 - Importe Neto
 - (and other sales fields)
 
+### Sheet 4: Stock Value (`Stock_Value`) *(optional)*
+- Artículo
+- Código Clave 1
+- Unidades
+- Importe
+
+When this sheet is present, the app aggregates by **Artículo**:
+- **Unidades Stock** = sum of `Unidades`
+- **Stock Valor** = sum of `Importe`
+
+These values are used for the dashboard KPI **Total Stock Value**.
+
 ---
 
 ## 📊 Output
