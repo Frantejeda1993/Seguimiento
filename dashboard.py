@@ -1414,14 +1414,19 @@ def main():
         with tab3:
             st.header("👥 Customer Analysis")
             
-            # Display customer table
-            clientes_display_df = clientes_df.copy()
-            for col in clientes_display_df.columns:
+            # Keep numeric dtypes for correct sorting and apply visual formatting in Streamlit
+            clientes_column_config = {}
+            for col in clientes_df.columns:
                 if 'Año' in col:
-                    clientes_display_df[col] = clientes_display_df[col].map(format_eur)
+                    clientes_column_config[col] = st.column_config.NumberColumn(col, format="€ %.2f")
                 if 'Dif' in col:
-                    clientes_display_df[col] = clientes_display_df[col].map(lambda v: f"{v:.1%}")
-            st.dataframe(clientes_display_df, use_container_width=True, height=600)
+                    clientes_column_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
+            st.dataframe(
+                clientes_df,
+                use_container_width=True,
+                height=600,
+                column_config=clientes_column_config,
+            )
             
             # Top customers chart
             st.subheader("Top 10 Customers by Current Year Sales")
@@ -1441,13 +1446,18 @@ def main():
         with tab4:
             st.header("👥 Customer Monthly Analysis")
 
-            clientes_monthly_display_df = clientes_monthly_df.copy()
-            for col in clientes_monthly_display_df.columns:
+            clientes_monthly_column_config = {}
+            for col in clientes_monthly_df.columns:
                 if col.startswith('Mes '):
-                    clientes_monthly_display_df[col] = clientes_monthly_display_df[col].map(format_eur)
+                    clientes_monthly_column_config[col] = st.column_config.NumberColumn(col, format="€ %.2f")
                 if 'Dif' in col:
-                    clientes_monthly_display_df[col] = clientes_monthly_display_df[col].map(lambda v: f"{v:.1%}")
-            st.dataframe(clientes_monthly_display_df, use_container_width=True, height=600)
+                    clientes_monthly_column_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
+            st.dataframe(
+                clientes_monthly_df,
+                use_container_width=True,
+                height=600,
+                column_config=clientes_monthly_column_config,
+            )
 
             st.subheader("Top 10 Customers by Last Month Sales")
             latest_month_cols = [col for col in clientes_monthly_df.columns if col.startswith('Mes ')]
