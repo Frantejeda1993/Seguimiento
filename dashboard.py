@@ -888,7 +888,7 @@ def main():
             stock_value_file = st.file_uploader(
                 "Stock Value Data (Excel/CSV)",
                 type=['xlsx', 'csv'],
-                help="Optional: Artículo, Código Clave 1, Unidades, Importe"
+                help="Optional: Clave 1, Código Artículo, Unidades, Importe"
             )
         
         if st.button("🚀 Process Data", type="primary"):

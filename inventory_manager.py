@@ -191,7 +191,10 @@ class InventoryManager:
         
         # Stock units and value
         if self.stock_value_df is not None and not self.stock_value_df.empty:
-            article_col = self._find_existing_column(self.stock_value_df, ('Artículo', 'Articulo'))
+            article_col = self._find_existing_column(
+                self.stock_value_df,
+                ('Código Artículo', 'Codigo Articulo', 'Artículo', 'Articulo')
+            )
             units_col = self._find_existing_column(self.stock_value_df, ('Unidades',))
             amount_col = self._find_existing_column(self.stock_value_df, ('Importe',))
 

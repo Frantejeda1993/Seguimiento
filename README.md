@@ -194,12 +194,12 @@ The system expects data in the same format as your Excel file:
 - (and other sales fields)
 
 ### Sheet 4: Stock Value (`Stock_Value`) *(optional)*
-- Artículo
-- Código Clave 1
+- Clave 1
+- Código Artículo
 - Unidades
 - Importe
 
-When this sheet is present, the app aggregates by **Artículo**:
+When this sheet is present, the app aggregates by article code (`Código Artículo`; also supports `Artículo` as alias):
 - **Unidades Stock** = sum of `Unidades`
 - **Stock Valor** = sum of `Importe`
 
