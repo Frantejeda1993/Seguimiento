@@ -19,14 +19,14 @@ import json
 import gzip
 import base64
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
 HISTORY_FILE = Path(".upload_history_local.json")
 MAX_CHUNK_SIZE = 700_000
 PRIMARY_UPLOAD_COLLECTION = "upload_history"
-ARCHIVE_UPLOAD_COLLECTION = "upload_history_permanent"
+HISTORY_RETENTION_DAYS = 7
 MARGIN_COLUMN = "CR3: % Margen s/Venta + Transport"
 SNAPSHOT_COLUMNS = {
     "stock": [
@@ -39,7 +39,9 @@ SNAPSHOT_COLUMNS = {
         "Importe Neto", "Unidades Venta"
     ],
     "recepciones": ["Artículo", "Fecha Recepción", "Unidades Stock", "Precio"],
+    "stock_value": ["Clave 1", "Código Artículo", "Unidades", "Importe"],
 }
+
 
 # Page configuration
 st.set_page_config(
@@ -469,84 +471,99 @@ def _save_local_history(history):
     HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
 
 
-def save_upload_snapshot(stock_df, ventas_df, recepciones_df, source="upload", snapshot_name: str | None = None):
+def _prune_expired_history_items(history: list[dict], now_utc: datetime | None = None) -> list[dict]:
+    """Keep only entries from the retention window."""
+    now_utc = now_utc or datetime.utcnow()
+    cutoff = now_utc - timedelta(days=HISTORY_RETENTION_DAYS)
+    kept = []
+    for item in history:
+        uploaded_at = item.get("uploaded_at")
+        if not uploaded_at:
+            continue
+        try:
+            uploaded_dt = datetime.fromisoformat(str(uploaded_at).replace("Z", ""))
+        except Exception:
+            continue
+        if uploaded_dt >= cutoff:
+            kept.append(item)
+    return kept
+
+
+def _delete_expired_firestore_docs(collection, now_utc: datetime | None = None):
+    """Best effort cleanup for snapshots older than retention days."""
+    if collection is None:
+        return
+
+    now_utc = now_utc or datetime.utcnow()
+    cutoff_iso = (now_utc - timedelta(days=HISTORY_RETENTION_DAYS)).isoformat()
+    docs = collection.where("uploaded_at", "<", cutoff_iso).limit(500).stream()
+    for doc in docs:
+        try:
+            for chunk_doc in doc.reference.collection("chunks").stream():
+                chunk_doc.reference.delete()
+            doc.reference.delete()
+        except Exception:
+            continue
+
+
+def save_upload_snapshot(
+    stock_df,
+    ventas_df,
+    recepciones_df,
+    stock_value_df=None,
+    source="upload",
+    snapshot_name: str | None = None,
+):
     stock_records = _serialize_df(stock_df, "stock")
     ventas_records = _serialize_df(ventas_df, "ventas")
     recepciones_records = _serialize_df(recepciones_df, "recepciones")
+    stock_value_records = _serialize_df(stock_value_df, "stock_value")
     stock_chunks = _encode_chunks(stock_records)
     ventas_chunks = _encode_chunks(ventas_records)
     recepciones_chunks = _encode_chunks(recepciones_records)
+    stock_value_chunks = _encode_chunks(stock_value_records)
 
     doc_payload = {
         "uploaded_at": datetime.utcnow().isoformat(),
         "source": source,
         "snapshot_name": (snapshot_name or "").strip() or None,
-        "file_count": 2 + int(recepciones_df is not None),
+        "file_count": 2 + int(recepciones_df is not None) + int(stock_value_df is not None),
         "stock_chunk_count": len(stock_chunks),
         "ventas_chunk_count": len(ventas_chunks),
         "recepciones_chunk_count": len(recepciones_chunks),
+        "stock_value_chunk_count": len(stock_value_chunks),
     }
 
     primary_collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
-    archive_collection = _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION)
-    if primary_collection is not None or archive_collection is not None:
-        snapshot_id = f"fb-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
-
-        if primary_collection is not None:
-            snapshot_id = primary_collection.document().id
-
+    if primary_collection is not None:
+        snapshot_id = primary_collection.document().id
         doc_payload["id"] = snapshot_id
-        write_succeeded = False
-        storage_targets = []
 
-        write_errors = []
-
-        if primary_collection is not None:
-            try:
-                primary_doc_ref = primary_collection.document(snapshot_id)
-                primary_doc_ref.set(doc_payload)
-                _persist_chunks_to_firestore(primary_doc_ref, "stock", stock_chunks)
-                _persist_chunks_to_firestore(primary_doc_ref, "ventas", ventas_chunks)
-                _persist_chunks_to_firestore(primary_doc_ref, "recepciones", recepciones_chunks)
-                write_succeeded = True
-                storage_targets.append("temporal")
-            except Exception as exc:
-                write_errors.append(f"upload_history: {_format_exception_message(exc)}")
-
-        if archive_collection is not None:
-            try:
-                archive_doc_ref = archive_collection.document(snapshot_id)
-                archive_doc_ref.set(doc_payload)
-                _persist_chunks_to_firestore(archive_doc_ref, "stock", stock_chunks)
-                _persist_chunks_to_firestore(archive_doc_ref, "ventas", ventas_chunks)
-                _persist_chunks_to_firestore(archive_doc_ref, "recepciones", recepciones_chunks)
-                write_succeeded = True
-                storage_targets.append("permanente")
-            except Exception as exc:
-                write_errors.append(f"upload_history_permanent: {_format_exception_message(exc)}")
-
-        if write_succeeded:
-            if storage_targets:
-                st.caption(f"💾 Histórico guardado en: {', '.join(storage_targets)}")
-            if write_errors:
-                _set_firebase_status("Errores parciales al guardar en Firebase: " + " | ".join(write_errors))
+        try:
+            primary_doc_ref = primary_collection.document(snapshot_id)
+            primary_doc_ref.set(doc_payload)
+            _persist_chunks_to_firestore(primary_doc_ref, "stock", stock_chunks)
+            _persist_chunks_to_firestore(primary_doc_ref, "ventas", ventas_chunks)
+            _persist_chunks_to_firestore(primary_doc_ref, "recepciones", recepciones_chunks)
+            _persist_chunks_to_firestore(primary_doc_ref, "stock_value", stock_value_chunks)
+            _delete_expired_firestore_docs(primary_collection)
+            st.caption("💾 Histórico guardado en: temporal (7 días)")
             return
-
-        if write_errors:
-            _set_firebase_status("No se pudo guardar en Firebase: " + " | ".join(write_errors))
+        except Exception as exc:
+            _set_firebase_status("No se pudo guardar en Firebase: " + _format_exception_message(exc))
 
     history = _load_local_history()
     snapshot_id = f"local-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
     doc_payload["stock_chunks"] = stock_chunks
     doc_payload["ventas_chunks"] = ventas_chunks
     doc_payload["recepciones_chunks"] = recepciones_chunks
+    doc_payload["stock_value_chunks"] = stock_value_chunks
     doc_payload["id"] = snapshot_id
     history.append(doc_payload)
-    _save_local_history(history)
+    _save_local_history(_prune_expired_history_items(history))
     firebase_status = st.session_state.get("firebase_status")
     if firebase_status:
         st.warning(f"⚠️ Guardado local. Firebase no disponible: {firebase_status}")
-
 
 
 
@@ -698,38 +715,22 @@ def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
 
 
 def list_upload_dates():
-    # Read from both collections and merge by id so old and recent snapshots
-    # remain visible even when one collection has a retention policy.
-    history_by_id = {}
-
-    for collection_name in (ARCHIVE_UPLOAD_COLLECTION, PRIMARY_UPLOAD_COLLECTION):
-        collection = _get_firebase_collection(collection_name)
-        if collection is None:
-            continue
-
+    collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
+    if collection is not None:
+        _delete_expired_firestore_docs(collection)
         docs = collection.order_by("uploaded_at", direction="DESCENDING").limit(500).stream()
+        history = []
         for doc in docs:
             data = doc.to_dict() or {}
             data["id"] = data.get("id") or doc.id
-            existing = history_by_id.get(data["id"])
-            if existing is None:
-                data["storage_scope"] = "permanente" if collection_name == ARCHIVE_UPLOAD_COLLECTION else "temporal"
-                history_by_id[data["id"]] = data
-                continue
+            data["storage_scope"] = "temporal"
+            history.append(data)
+        if history:
+            return history
 
-            storage_scope = existing.get("storage_scope", "")
-            scopes = {s for s in storage_scope.split("+") if s}
-            scopes.add("permanente" if collection_name == ARCHIVE_UPLOAD_COLLECTION else "temporal")
-            existing["storage_scope"] = "+".join(sorted(scopes))
-
-    if history_by_id:
-        return sorted(
-            history_by_id.values(),
-            key=lambda x: x.get("uploaded_at", ""),
-            reverse=True,
-        )
-
-    history = sorted(_load_local_history(), key=lambda x: x.get("uploaded_at", ""), reverse=True)
+    local_history = _prune_expired_history_items(_load_local_history())
+    _save_local_history(local_history)
+    history = sorted(local_history, key=lambda x: x.get("uploaded_at", ""), reverse=True)
     return history[:50]
 
 
@@ -744,6 +745,7 @@ def get_upload_by_id(upload_id: str):
             stock_count = int(data.get("stock_chunk_count", 0) or 0)
             ventas_count = int(data.get("ventas_chunk_count", 0) or 0)
             recepciones_count = int(data.get("recepciones_chunk_count", 0) or 0)
+            stock_value_count = int(data.get("stock_value_chunk_count", 0) or 0)
 
             data["stock_chunks"] = _load_chunks_from_firestore(doc_snapshot.reference, "stock", stock_count)
             data["ventas_chunks"] = _load_chunks_from_firestore(doc_snapshot.reference, "ventas", ventas_count)
@@ -752,16 +754,15 @@ def get_upload_by_id(upload_id: str):
                 "recepciones",
                 recepciones_count,
             )
+            data["stock_value_chunks"] = _load_chunks_from_firestore(
+                doc_snapshot.reference,
+                "stock_value",
+                stock_value_count,
+            )
 
         return data
 
     primary_collection = _get_firebase_collection(PRIMARY_UPLOAD_COLLECTION)
-    archive_collection = _get_firebase_collection(ARCHIVE_UPLOAD_COLLECTION)
-    if archive_collection is not None:
-        doc = archive_collection.document(upload_id).get()
-        hydrated = _hydrate_firestore_doc(doc)
-        if hydrated is not None:
-            return hydrated
 
     if primary_collection is not None:
         doc = primary_collection.document(upload_id).get()
@@ -868,6 +869,7 @@ def main():
                         manager.stock_df = _deserialize_df(_decode_chunks(doc.get("stock_chunks", [])))
                         manager.ventas_df = _deserialize_df(_decode_chunks(doc.get("ventas_chunks", [])))
                         manager.recepciones_df = _deserialize_df(_decode_chunks(doc.get("recepciones_chunks", [])))
+                        manager.stock_value_df = _deserialize_df(_decode_chunks(doc.get("stock_value_chunks", [])))
 
                         st.session_state.manager = manager
                         st.session_state.data_loaded = True
@@ -977,6 +979,7 @@ def main():
                                 manager.stock_df,
                                 manager.ventas_df,
                                 manager.recepciones_df,
+                                manager.stock_value_df,
                                 source="upload",
                                 snapshot_name=snapshot_name
                             )
