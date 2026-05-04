@@ -49,6 +49,11 @@ class InventoryManager:
         self.stock_value_df = None
         self.compras_df = None
         self.clientes_df = None
+        self.extra_margin_aliases: tuple[str, ...] = tuple()
+
+    def set_extra_margin_aliases(self, aliases: list[str] | tuple[str, ...] | None):
+        """Allow dynamically configured margin aliases from the UI."""
+        self.extra_margin_aliases = tuple(aliases or ())
     
     def load_data(self, stock_file: str = None, recepciones_file: str = None,
                   ventas_file: str = None, stock_value_file: str = None, excel_file: str = None):
@@ -120,7 +125,7 @@ class InventoryManager:
             for col in self.ventas_df.columns
         }
 
-        for alias in MARGIN_COLUMN_ALIASES:
+        for alias in (*MARGIN_COLUMN_ALIASES, *self.extra_margin_aliases):
             normalized_alias = self._normalize_column_name(alias).casefold()
             if normalized_alias in normalized_to_original:
                 return normalized_to_original[normalized_alias]
