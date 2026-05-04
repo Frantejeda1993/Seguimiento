@@ -12,7 +12,7 @@ import os
 # Asegurar que Python encuentre el módulo
 sys.path.insert(0, os.path.dirname(__file__))
 
-from inventory_manager import InventoryManager
+from inventory_manager import InventoryManager, ColumnMappingError
 import io
 import hmac
 import json
@@ -895,6 +895,7 @@ def main():
 
                         st.session_state.manager = manager
                         st.session_state.data_loaded = True
+                        st.session_state.column_overrides = {}
                         st.success("✅ Histórico cargado")
                         st.rerun()
                 except Exception as exc:
@@ -920,6 +921,8 @@ def main():
         st.session_state.manager = None
     if 'data_loaded' not in st.session_state:
         st.session_state.data_loaded = False
+    if 'column_overrides' not in st.session_state:
+        st.session_state.column_overrides = {}
     
     # Data loading section
     if data_source == "Upload Files":
@@ -996,6 +999,7 @@ def main():
                         
                         st.session_state.manager = manager
                         st.session_state.data_loaded = True
+                        st.session_state.column_overrides = {}
 
                         try:
                             save_upload_snapshot(
@@ -1034,6 +1038,7 @@ def main():
                     
                     st.session_state.manager = manager
                     st.session_state.data_loaded = True
+                    st.session_state.column_overrides = {}
                     st.success("✅ Sample data loaded!")
                     st.rerun()
                 except Exception as e:
@@ -1047,49 +1052,53 @@ def main():
         # Calculate analysis
         with st.spinner("Calculating..."):
             try:
-                compras_df = manager.calculate_compras(contemplar_sobre_stock)
-            except KeyError as e:
-                error_text = str(e)
-                margin_error_detected = (
-                    "Column not found for margin percentage" in error_text
-                    or (
-                        "No se pudieron resolver todas las columnas requeridas para 'Ventas'" in error_text
-                        and "Información faltante por asignar:" in error_text
-                        and "- Margen" in error_text
-                    )
+                compras_df = manager.calculate_compras(
+                    contemplar_sobre_stock,
+                    column_overrides=st.session_state.get("column_overrides"),
                 )
-                if margin_error_detected and manager.ventas_df is not None:
-                    st.error(f"Error in calculations: {str(e)}")
-                    st.info(
-                        "Selecciona una columna de ventas no usada para tratarla como margen. "
-                        "Se guardará para próximas cargas."
-                    )
-                    used_cols = {
-                        "Artículo", "Clave 1", "Descripción Artículo", "Precio Coste",
-                        "Cliente", "Nombre Cliente", "Año Factura", "Mes Factura",
-                        "Importe Neto", "Unidades Venta"
-                    }
-                    candidate_columns = [
-                        col for col in manager.ventas_df.columns
-                        if col not in used_cols
-                    ]
-                    selected_margin_col = st.selectbox(
-                        "Columna a usar como margen (%)",
-                        options=candidate_columns,
-                        key="manual_margin_column_selector",
-                    ) if candidate_columns else None
-                    if st.button("Guardar columna de margen y recalcular", type="primary"):
-                        if selected_margin_col:
-                            aliases = _load_margin_aliases()
-                            aliases.append(selected_margin_col)
-                            _save_margin_aliases(aliases)
-                            manager.set_extra_margin_aliases(aliases)
-                            st.success(f"Columna '{selected_margin_col}' guardada como alias de margen.")
-                            st.rerun()
-                        else:
-                            st.warning("No hay columnas disponibles para seleccionar.")
-                    return
-                st.error(f"Error in calculations: {str(e)}")
+            except ColumnMappingError as cme:
+                st.warning(
+                    f"Faltan columnas para '{cme.input_name}': "
+                    f"{', '.join(cme.missing) if cme.missing else '(ninguna)'}"
+                )
+                with st.form("column_mapping_form"):
+                    mapping_selection = {}
+                    available_options = list(cme.available)
+                    for logical_name, resolved_col in cme.resolved.items():
+                        default_idx = available_options.index(resolved_col) if resolved_col in available_options else 0
+                        mapping_selection[logical_name] = st.selectbox(
+                            logical_name,
+                            options=available_options,
+                            index=default_idx,
+                            key=f"mapping_resolved_{cme.input_name}_{logical_name}",
+                        )
+
+                    for logical_name in cme.missing:
+                        mapping_selection[logical_name] = st.selectbox(
+                            logical_name,
+                            options=["— select —", *available_options],
+                            index=0,
+                            key=f"mapping_missing_{cme.input_name}_{logical_name}",
+                        )
+
+                    submitted = st.form_submit_button("Guardar mapeo y recalcular", type="primary")
+
+                if submitted:
+                    still_missing = [name for name in cme.missing if mapping_selection.get(name) == "— select —"]
+                    if still_missing:
+                        st.error(f"Debes seleccionar columna para: {', '.join(still_missing)}")
+                        return
+
+                    input_overrides = st.session_state.setdefault("column_overrides", {}).setdefault(cme.input_name, {})
+                    input_overrides.update(mapping_selection)
+
+                    if cme.input_name == "Ventas" and "Margen" in mapping_selection:
+                        aliases = _load_margin_aliases()
+                        aliases.append(mapping_selection["Margen"])
+                        _save_margin_aliases(aliases)
+                        manager.set_extra_margin_aliases(_load_margin_aliases())
+
+                    st.rerun()
                 return
             except Exception as e:
                 st.error(f"Error in calculations: {str(e)}")
