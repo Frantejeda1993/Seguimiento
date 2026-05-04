@@ -23,6 +23,24 @@ MARGIN_COLUMN_ALIASES = (
     LEGACY_MARGIN_COLUMN,
     'CR2: % Margen s/Venta sin Transporte Athena',
 )
+REQUIRED_VENTAS_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    'Artículo': ('Artículo', 'Articulo'),
+    'Clave 1': ('Clave 1',),
+    'Descripción Artículo': ('Descripción Artículo', 'Descripcion Articulo'),
+    'Precio Coste': ('Precio Coste',),
+}
+
+
+class ColumnMappingError(Exception):
+    def __init__(self, input_name: str, resolved: dict[str, str], missing: list[str], available: list[str]):
+        self.input_name = input_name
+        self.resolved = resolved
+        self.missing = missing
+        self.available = available
+        super().__init__(
+            f"No se pudieron resolver columnas para '{input_name}'. "
+            f"Faltan: {', '.join(missing) if missing else 'ninguna'}."
+        )
 
 
 class InventoryManager:
@@ -149,13 +167,16 @@ class InventoryManager:
 
     def _ensure_required_columns(self, input_name: str, df: pd.DataFrame, expected_aliases: Dict[str, Tuple[str, ...]]):
         """Validate required columns and raise a mapping-focused error when columns are missing."""
-        missing = [
-            logical_name
-            for logical_name, aliases in expected_aliases.items()
-            if self._find_existing_column(df, aliases) is None
-        ]
+        resolved = {}
+        missing = []
+        for logical_name, aliases in expected_aliases.items():
+            found = self._find_existing_column(df, aliases)
+            if found is None:
+                missing.append(logical_name)
+            else:
+                resolved[logical_name] = found
         if missing:
-            raise KeyError(self._format_input_column_mapping_error(input_name, df, expected_aliases))
+            raise ColumnMappingError(input_name, resolved, missing, list(df.columns))
 
     def _resolve_margin_column(self) -> str:
         """Resolve margin column name allowing legacy labels and spacing variants."""
@@ -179,15 +200,23 @@ class InventoryManager:
             if normalized_col.startswith('cr2:') and 'margen s/venta' in normalized_col:
                 return col
 
-        raise KeyError(
-            self._format_input_column_mapping_error(
-                'Ventas',
-                self.ventas_df,
-                {'Margen': tuple((*MARGIN_COLUMN_ALIASES, *self.extra_margin_aliases))},
-            )
+        resolved_ventas = {
+            logical_name: found
+            for logical_name, aliases in REQUIRED_VENTAS_COLUMNS.items()
+            if (found := self._find_existing_column(self.ventas_df, aliases)) is not None
+        }
+        raise ColumnMappingError(
+            input_name='Ventas',
+            resolved=resolved_ventas,
+            missing=['Margen'],
+            available=list(self.ventas_df.columns),
         )
 
-    def calculate_compras(self, contemplar_sobre_stock: bool = False) -> pd.DataFrame:
+    def calculate_compras(
+        self,
+        contemplar_sobre_stock: bool = False,
+        column_overrides: dict[str, dict[str, str]] | None = None,
+    ) -> pd.DataFrame:
         """
         Calculate purchase recommendations (COMPRAS sheet).
         
@@ -200,30 +229,31 @@ class InventoryManager:
         if self.ventas_df is None or self.stock_df is None:
             raise ValueError("Sales and stock data must be loaded first")
 
-        self._ensure_required_columns(
-            'Ventas',
-            self.ventas_df,
-            {
-                'Artículo': ('Artículo', 'Articulo'),
-                'Clave 1': ('Clave 1',),
-                'Descripción Artículo': ('Descripción Artículo', 'Descripcion Articulo'),
-                'Precio Coste': ('Precio Coste',),
-            },
-        )
+        column_overrides = column_overrides or {}
+        ventas_aliases = dict(REQUIRED_VENTAS_COLUMNS)
+        for logical_name, override_col in column_overrides.get('Ventas', {}).items():
+            if logical_name in ventas_aliases and override_col:
+                ventas_aliases[logical_name] = (override_col, *ventas_aliases[logical_name])
 
+        self._ensure_required_columns('Ventas', self.ventas_df, ventas_aliases)
+
+        stock_aliases = {
+            'Artículo': ('Artículo', 'Articulo'),
+            'Situación': ('Situación', 'Situacion'),
+            'Stock': ('Stock',),
+            'Cartera': ('Cartera',),
+            'Reservas': ('Reservas',),
+            'Pendiente Recibir Compra': ('Pendiente Recibir Compra',),
+            'Pendiente Entrar Fabricación': ('Pendiente Entrar Fabricación', 'Pendiente Entrar Fabricacion'),
+            'En Tránsito': ('En Tránsito', 'En Transito'),
+        }
+        for logical_name, override_col in column_overrides.get('Stock', {}).items():
+            if logical_name in stock_aliases and override_col:
+                stock_aliases[logical_name] = (override_col, *stock_aliases[logical_name])
         self._ensure_required_columns(
             'Stock',
             self.stock_df,
-            {
-                'Artículo': ('Artículo', 'Articulo'),
-                'Situación': ('Situación', 'Situacion'),
-                'Stock': ('Stock',),
-                'Cartera': ('Cartera',),
-                'Reservas': ('Reservas',),
-                'Pendiente Recibir Compra': ('Pendiente Recibir Compra',),
-                'Pendiente Entrar Fabricación': ('Pendiente Entrar Fabricación', 'Pendiente Entrar Fabricacion'),
-                'En Tránsito': ('En Tránsito', 'En Transito'),
-            },
+            stock_aliases,
         )
 
         # Get unique SKUs from sales
@@ -247,7 +277,7 @@ class InventoryManager:
         compras['Precio Compra'] = compras['SKU'].map(precio_map)
         
         # Add margin (from ventas)
-        margin_column = self._resolve_margin_column()
+        margin_column = column_overrides.get('Ventas', {}).get('Margen') or self._resolve_margin_column()
         margin_map = self.ventas_df.groupby('Artículo')[margin_column].mean()
         compras['Margen'] = compras['SKU'].map(margin_map)
         
