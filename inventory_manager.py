@@ -118,6 +118,45 @@ class InventoryManager:
         return None
     
 
+
+
+    def _format_input_column_mapping_error(self, input_name: str, df: pd.DataFrame, expected_aliases: Dict[str, Tuple[str, ...]]) -> str:
+        """Build a detailed mapping report for an input with missing required columns."""
+        matched: Dict[str, str] = {}
+        for logical_name, aliases in expected_aliases.items():
+            found = self._find_existing_column(df, aliases)
+            if found is not None:
+                matched[logical_name] = found
+
+        missing = [name for name in expected_aliases if name not in matched]
+        used_columns = set(matched.values())
+        free_columns = [col for col in df.columns if col not in used_columns]
+
+        assigned_lines = [f"- {logical}: {column}" for logical, column in matched.items()]
+        missing_lines = [f"- {logical}" for logical in missing]
+        free_lines = [f"- {column}" for column in free_columns]
+
+        assigned_block = "\n".join(assigned_lines) if assigned_lines else "- (ninguna)"
+        missing_block = "\n".join(missing_lines) if missing_lines else "- (ninguna)"
+        free_block = "\n".join(free_lines) if free_lines else "- (ninguna)"
+
+        return (
+            f"No se pudieron resolver todas las columnas requeridas para '{input_name}'.\n"
+            f"Columnas asignadas:\n{assigned_block}\n"
+            f"Información faltante por asignar:\n{missing_block}\n"
+            f"Columnas libres detectadas en el input:\n{free_block}"
+        )
+
+    def _ensure_required_columns(self, input_name: str, df: pd.DataFrame, expected_aliases: Dict[str, Tuple[str, ...]]):
+        """Validate required columns and raise a mapping-focused error when columns are missing."""
+        missing = [
+            logical_name
+            for logical_name, aliases in expected_aliases.items()
+            if self._find_existing_column(df, aliases) is None
+        ]
+        if missing:
+            raise KeyError(self._format_input_column_mapping_error(input_name, df, expected_aliases))
+
     def _resolve_margin_column(self) -> str:
         """Resolve margin column name allowing legacy labels and spacing variants."""
         normalized_to_original = {
@@ -141,7 +180,11 @@ class InventoryManager:
                 return col
 
         raise KeyError(
-            "Column not found for margin percentage. Expected CR3/CR2 margin column variants."
+            self._format_input_column_mapping_error(
+                'Ventas',
+                self.ventas_df,
+                {'Margen': tuple((*MARGIN_COLUMN_ALIASES, *self.extra_margin_aliases))},
+            )
         )
 
     def calculate_compras(self, contemplar_sobre_stock: bool = False) -> pd.DataFrame:
@@ -156,7 +199,33 @@ class InventoryManager:
         """
         if self.ventas_df is None or self.stock_df is None:
             raise ValueError("Sales and stock data must be loaded first")
-        
+
+        self._ensure_required_columns(
+            'Ventas',
+            self.ventas_df,
+            {
+                'Artículo': ('Artículo', 'Articulo'),
+                'Clave 1': ('Clave 1',),
+                'Descripción Artículo': ('Descripción Artículo', 'Descripcion Articulo'),
+                'Precio Coste': ('Precio Coste',),
+            },
+        )
+
+        self._ensure_required_columns(
+            'Stock',
+            self.stock_df,
+            {
+                'Artículo': ('Artículo', 'Articulo'),
+                'Situación': ('Situación', 'Situacion'),
+                'Stock': ('Stock',),
+                'Cartera': ('Cartera',),
+                'Reservas': ('Reservas',),
+                'Pendiente Recibir Compra': ('Pendiente Recibir Compra',),
+                'Pendiente Entrar Fabricación': ('Pendiente Entrar Fabricación', 'Pendiente Entrar Fabricacion'),
+                'En Tránsito': ('En Tránsito', 'En Transito'),
+            },
+        )
+
         # Get unique SKUs from sales
         skus = self.ventas_df['Artículo'].unique()
         
