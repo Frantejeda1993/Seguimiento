@@ -28,6 +28,7 @@ MAX_CHUNK_SIZE = 700_000
 PRIMARY_UPLOAD_COLLECTION = "upload_history"
 HISTORY_RETENTION_DAYS = 7
 MARGIN_COLUMN = "CR3: % Margen s/Venta + Transport"
+MARGIN_ALIASES_FILE = Path(".margin_column_aliases.json")
 SNAPSHOT_COLUMNS = {
     "stock": [
         "Artículo", "Descripción", "Situación", "Stock", "Cartera", "Reservas",
@@ -41,6 +42,26 @@ SNAPSHOT_COLUMNS = {
     "recepciones": ["Artículo", "Fecha Recepción", "Unidades Stock", "Precio"],
     "stock_value": ["Clave 1", "Código Artículo", "Unidades", "Importe"],
 }
+
+
+def _load_margin_aliases() -> list[str]:
+    if not MARGIN_ALIASES_FILE.exists():
+        return []
+    try:
+        data = json.loads(MARGIN_ALIASES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item).strip()]
+
+
+def _save_margin_aliases(aliases: list[str]) -> None:
+    deduped = list(dict.fromkeys([str(item).strip() for item in aliases if str(item).strip()]))
+    MARGIN_ALIASES_FILE.write_text(
+        json.dumps(deduped, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 # Page configuration
@@ -866,6 +887,7 @@ def main():
                         st.error("No se encontró el histórico seleccionado")
                     else:
                         manager = InventoryManager(meses_compras=meses_compras)
+                        manager.set_extra_margin_aliases(_load_margin_aliases())
                         manager.stock_df = _deserialize_df(_decode_chunks(doc.get("stock_chunks", [])))
                         manager.ventas_df = _deserialize_df(_decode_chunks(doc.get("ventas_chunks", [])))
                         manager.recepciones_df = _deserialize_df(_decode_chunks(doc.get("recepciones_chunks", [])))
@@ -939,6 +961,7 @@ def main():
                     try:
                         # Load uploaded files
                         manager = InventoryManager(meses_compras=meses_compras)
+                        manager.set_extra_margin_aliases(_load_margin_aliases())
                         
                         # Read files based on type
                         if stock_file.name.endswith('.xlsx'):
@@ -1004,6 +1027,7 @@ def main():
                     stock_df, ventas_df, recepciones_df = load_sample_data()
                     
                     manager = InventoryManager(meses_compras=meses_compras)
+                    manager.set_extra_margin_aliases(_load_margin_aliases())
                     manager.stock_df = stock_df
                     manager.ventas_df = ventas_df
                     manager.recepciones_df = recepciones_df
@@ -1024,6 +1048,41 @@ def main():
         with st.spinner("Calculating..."):
             try:
                 compras_df = manager.calculate_compras(contemplar_sobre_stock)
+            except KeyError as e:
+                margin_error = "Column not found for margin percentage"
+                if margin_error in str(e) and manager.ventas_df is not None:
+                    st.error(f"Error in calculations: {str(e)}")
+                    st.info(
+                        "Selecciona una columna de ventas no usada para tratarla como margen. "
+                        "Se guardará para próximas cargas."
+                    )
+                    used_cols = {
+                        "Artículo", "Clave 1", "Descripción Artículo", "Precio Coste",
+                        "Cliente", "Nombre Cliente", "Año Factura", "Mes Factura",
+                        "Importe Neto", "Unidades Venta"
+                    }
+                    candidate_columns = [
+                        col for col in manager.ventas_df.columns
+                        if col not in used_cols
+                    ]
+                    selected_margin_col = st.selectbox(
+                        "Columna a usar como margen (%)",
+                        options=candidate_columns,
+                        key="manual_margin_column_selector",
+                    ) if candidate_columns else None
+                    if st.button("Guardar columna de margen y recalcular", type="primary"):
+                        if selected_margin_col:
+                            aliases = _load_margin_aliases()
+                            aliases.append(selected_margin_col)
+                            _save_margin_aliases(aliases)
+                            manager.set_extra_margin_aliases(aliases)
+                            st.success(f"Columna '{selected_margin_col}' guardada como alias de margen.")
+                            st.rerun()
+                        else:
+                            st.warning("No hay columnas disponibles para seleccionar.")
+                    return
+                st.error(f"Error in calculations: {str(e)}")
+                return
             except Exception as e:
                 st.error(f"Error in calculations: {str(e)}")
                 return
