@@ -17,6 +17,7 @@ MARGIN_COLUMN_ALIASES = (
     MARGIN_COLUMN,
     'CR3: %Margen s/Venta + Transport',
     'CR3: %Margen s/Venta + Transporte',
+    'CR5: % Margen s/Venta + Marketing',
     'CR3: % Margen s/Venta + Transport',
     'CR3:% Margen s/Venta + Transport',
     LEGACY_MARGIN_COLUMN,
