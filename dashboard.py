@@ -1049,8 +1049,16 @@ def main():
             try:
                 compras_df = manager.calculate_compras(contemplar_sobre_stock)
             except KeyError as e:
-                margin_error = "Column not found for margin percentage"
-                if margin_error in str(e) and manager.ventas_df is not None:
+                error_text = str(e)
+                margin_error_detected = (
+                    "Column not found for margin percentage" in error_text
+                    or (
+                        "No se pudieron resolver todas las columnas requeridas para 'Ventas'" in error_text
+                        and "Información faltante por asignar:" in error_text
+                        and "- Margen" in error_text
+                    )
+                )
+                if margin_error_detected and manager.ventas_df is not None:
                     st.error(f"Error in calculations: {str(e)}")
                     st.info(
                         "Selecciona una columna de ventas no usada para tratarla como margen. "
