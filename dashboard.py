@@ -12,7 +12,15 @@ import os
 # Asegurar que Python encuentre el módulo
 sys.path.insert(0, os.path.dirname(__file__))
 
-from inventory_manager import InventoryManager, ColumnMappingError
+import inventory_manager as inventory_manager_module
+
+InventoryManager = inventory_manager_module.InventoryManager
+ColumnMappingError = inventory_manager_module.ColumnMappingError
+MultiColumnMappingError = getattr(
+    inventory_manager_module,
+    "MultiColumnMappingError",
+    type("MultiColumnMappingError", (Exception,), {}),
+)
 import io
 import hmac
 import json
@@ -62,6 +70,89 @@ def _save_margin_aliases(aliases: list[str]) -> None:
         json.dumps(deduped, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def render_column_mapping_form(
+    errors: list[ColumnMappingError],
+    manager,
+) -> bool:
+    """
+    Render the column-mapping resolution form.
+
+    Shows one section per ColumnMappingError:
+      - Already-resolved columns as read-only info (✅)
+      - Missing columns as selectboxes
+      - All available columns come from each erring input.
+
+    Returns True if the form was submitted successfully and st.rerun() should
+    be called by the caller.
+    """
+    st.warning(
+        "⚠️ Algunas columnas no pudieron mapearse automáticamente. "
+        "Revisa la asignación y haz clic en **Guardar y recalcular**."
+    )
+
+    with st.form("column_mapping_form"):
+        all_selections: dict[str, dict[str, str]] = {}
+
+        for cme in errors:
+            st.subheader(f"📋 Input: {cme.input_name}")
+            available_options = list(cme.available)
+
+            if cme.resolved:
+                st.markdown("**Columnas mapeadas automáticamente ✅**")
+                for logical_name, actual_col in cme.resolved.items():
+                    st.info(f"**{logical_name}** → `{actual_col}`")
+
+            input_selections: dict[str, str] = dict(cme.resolved)
+
+            if cme.missing:
+                st.markdown("**Columnas que necesitan asignación manual ⚠️**")
+                for logical_name in cme.missing:
+                    chosen = st.selectbox(
+                        f"{logical_name}",
+                        options=["— seleccionar —", *available_options],
+                        index=0,
+                        key=f"mapping_{cme.input_name}_{logical_name}",
+                    )
+                    input_selections[logical_name] = chosen
+
+            all_selections[cme.input_name] = input_selections
+            st.divider()
+
+        submitted = st.form_submit_button("💾 Guardar y recalcular", type="primary")
+
+    if not submitted:
+        return False
+
+    still_missing = []
+    errors_by_input = {cme.input_name: cme for cme in errors}
+    for input_name, selections in all_selections.items():
+        cme = errors_by_input.get(input_name)
+        if not cme:
+            continue
+        for logical_name in cme.missing:
+            if selections.get(logical_name, "— seleccionar —") == "— seleccionar —":
+                still_missing.append(f"{input_name} → {logical_name}")
+
+    if still_missing:
+        st.error("Debes seleccionar una columna para: " + ", ".join(still_missing))
+        return False
+
+    for input_name, selections in all_selections.items():
+        overrides = st.session_state.setdefault("column_overrides", {}).setdefault(input_name, {})
+        overrides.update({k: v for k, v in selections.items() if v != "— seleccionar —"})
+
+        if input_name == "Ventas" and "Margen" in selections:
+            margin_col = selections["Margen"]
+            if margin_col and margin_col != "— seleccionar —":
+                aliases = _load_margin_aliases()
+                if margin_col not in aliases:
+                    aliases.append(margin_col)
+                    _save_margin_aliases(aliases)
+                manager.set_extra_margin_aliases(_load_margin_aliases())
+
+    return True
 
 
 # Page configuration
@@ -1056,48 +1147,12 @@ def main():
                     contemplar_sobre_stock,
                     column_overrides=st.session_state.get("column_overrides"),
                 )
+            except MultiColumnMappingError as multi_err:
+                if render_column_mapping_form(multi_err.errors, manager):
+                    st.rerun()
+                return
             except ColumnMappingError as cme:
-                st.warning(
-                    f"Faltan columnas para '{cme.input_name}': "
-                    f"{', '.join(cme.missing) if cme.missing else '(ninguna)'}"
-                )
-                with st.form("column_mapping_form"):
-                    mapping_selection = {}
-                    available_options = list(cme.available)
-                    for logical_name, resolved_col in cme.resolved.items():
-                        default_idx = available_options.index(resolved_col) if resolved_col in available_options else 0
-                        mapping_selection[logical_name] = st.selectbox(
-                            logical_name,
-                            options=available_options,
-                            index=default_idx,
-                            key=f"mapping_resolved_{cme.input_name}_{logical_name}",
-                        )
-
-                    for logical_name in cme.missing:
-                        mapping_selection[logical_name] = st.selectbox(
-                            logical_name,
-                            options=["— select —", *available_options],
-                            index=0,
-                            key=f"mapping_missing_{cme.input_name}_{logical_name}",
-                        )
-
-                    submitted = st.form_submit_button("Guardar mapeo y recalcular", type="primary")
-
-                if submitted:
-                    still_missing = [name for name in cme.missing if mapping_selection.get(name) == "— select —"]
-                    if still_missing:
-                        st.error(f"Debes seleccionar columna para: {', '.join(still_missing)}")
-                        return
-
-                    input_overrides = st.session_state.setdefault("column_overrides", {}).setdefault(cme.input_name, {})
-                    input_overrides.update(mapping_selection)
-
-                    if cme.input_name == "Ventas" and "Margen" in mapping_selection:
-                        aliases = _load_margin_aliases()
-                        aliases.append(mapping_selection["Margen"])
-                        _save_margin_aliases(aliases)
-                        manager.set_extra_margin_aliases(_load_margin_aliases())
-
+                if render_column_mapping_form([cme], manager):
                     st.rerun()
                 return
             except Exception as e:
