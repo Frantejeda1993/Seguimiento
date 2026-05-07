@@ -75,6 +75,7 @@ def _save_margin_aliases(aliases: list[str]) -> None:
 def render_column_mapping_form(
     errors: list[ColumnMappingError],
     manager,
+    dataframes: dict[str, pd.DataFrame],
 ) -> bool:
     """
     Render the column-mapping resolution form.
@@ -82,7 +83,8 @@ def render_column_mapping_form(
     Shows one section per ColumnMappingError:
       - Already-resolved columns as read-only info (✅)
       - Missing columns as selectboxes
-      - All available columns come from each erring input.
+      - Available columns come from the live DataFrame for each erring input,
+        falling back to the columns captured in the error.
 
     Returns True if the form was submitted successfully and st.rerun() should
     be called by the caller.
@@ -97,7 +99,8 @@ def render_column_mapping_form(
 
         for cme in errors:
             st.subheader(f"📋 Input: {cme.input_name}")
-            available_options = list(cme.available)
+            live_df = dataframes.get(cme.input_name, pd.DataFrame())
+            available_options = list(live_df.columns) or list(cme.available)
 
             if cme.resolved:
                 st.markdown("**Columnas mapeadas automáticamente ✅**")
@@ -513,8 +516,9 @@ def _calculate_total_stock_value(manager: InventoryManager, compras_filtered: pd
 def _serialize_df(df: pd.DataFrame | None, kind: str):
     if df is None:
         return []
-    keep_cols = [c for c in SNAPSHOT_COLUMNS[kind] if c in df.columns]
-    data = df[keep_cols] if keep_cols else df
+    priority_cols = [c for c in SNAPSHOT_COLUMNS[kind] if c in df.columns]
+    remaining_cols = [c for c in df.columns if c not in priority_cols]
+    data = df[priority_cols + remaining_cols]
     return json.loads(data.to_json(orient="records", date_format="iso"))
 
 
@@ -1148,11 +1152,19 @@ def main():
                     column_overrides=st.session_state.get("column_overrides"),
                 )
             except MultiColumnMappingError as multi_err:
-                if render_column_mapping_form(multi_err.errors, manager):
+                dataframes = {
+                    "Ventas": manager.ventas_df if manager.ventas_df is not None else pd.DataFrame(),
+                    "Stock": manager.stock_df if manager.stock_df is not None else pd.DataFrame(),
+                }
+                if render_column_mapping_form(multi_err.errors, manager, dataframes=dataframes):
                     st.rerun()
                 return
             except ColumnMappingError as cme:
-                if render_column_mapping_form([cme], manager):
+                dataframes = {
+                    "Ventas": manager.ventas_df if manager.ventas_df is not None else pd.DataFrame(),
+                    "Stock": manager.stock_df if manager.stock_df is not None else pd.DataFrame(),
+                }
+                if render_column_mapping_form([cme], manager, dataframes=dataframes):
                     st.rerun()
                 return
             except Exception as e:
