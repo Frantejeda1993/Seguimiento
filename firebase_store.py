@@ -105,3 +105,17 @@ def get_upload_by_id(doc_id: str) -> dict | None:
     data["recepciones_df"] = pd.DataFrame(recepciones_records)
 
     return data
+
+RECOMMENDATION_COLLECTION = "recommendation_log"
+def save_recommendation_log(compras: pd.DataFrame, as_of, meses_compras: float, source: str) -> str:
+    """Guarda una recomendación compacta sin TTL para auditoría de cada ciclo."""
+    columns = ['SKU', 'Marca', 'Patrón demanda', 'Demanda prevista H', 'PEDIDO',
+               'PEDIDO ACTUAL', 'Disponible Teorico', 'Comprometido']
+    records = compras.reindex(columns=columns).rename(columns={
+        'Demanda prevista H': 'demanda_prevista_h', 'PEDIDO': 'pedido_propuesto',
+        'PEDIDO ACTUAL': 'pedido_actual', 'Disponible Teorico': 'disponible_teorico',
+        'Patrón demanda': 'patron_demanda'}).fillna(0).to_dict(orient='records')
+    doc = init_firebase().collection(RECOMMENDATION_COLLECTION).document()
+    doc.set({'created_at': firestore.SERVER_TIMESTAMP, 'as_of': str(as_of),
+             'meses_compras': meses_compras, 'source': source, 'records': records})
+    return doc.id
