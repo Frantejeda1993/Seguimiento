@@ -86,10 +86,8 @@ CLIENTES Sheet (Customer Analysis)
 # Change purchase forecast period
 manager = InventoryManager(meses_compras=3)  # 3 months instead of 2
 
-# The optional deprecated parameter is no longer needed.
-compras = manager.calculate_compras()
-print(f"Processed {len(compras)} items")
-print(compras[['SKU', 'Descripción', 'PEDIDO', 'VALOR PEDIDO']].head(10))
+# Consider items that are over-stocked
+compras = manager.calculate_compras(contemplar_sobre_stock=True)
 
 
 # ============================================================================
