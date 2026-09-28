@@ -1,12 +1,11 @@
 """
 Simple command-line script to process inventory data
-Usage: python run_analysis.py <excel_file> [--months N]
+Usage: python run_analysis.py <excel_file> [--months N] [--over-stock]
 """
 
 import sys
 import argparse
-import pandas as pd
-from inventory_manager import InventoryManager, ColumnMappingError, MultiColumnMappingError
+from inventory_manager import InventoryManager
 
 
 def main():
@@ -19,9 +18,14 @@ def main():
     )
     parser.add_argument(
         '--months',
-        type=float,
+        type=int,
         default=2,
         help='Number of months for purchase calculations (default: 2)'
+    )
+    parser.add_argument(
+        '--over-stock',
+        action='store_true',
+        help='Consider items that are over-stocked'
     )
     parser.add_argument(
         '--output',
@@ -36,6 +40,7 @@ def main():
     print("=" * 80)
     print(f"\nProcessing: {args.excel_file}")
     print(f"Purchase months: {args.months}")
+    print(f"Consider over-stock: {args.over_stock}")
     print("\nLoading data...")
     
     try:
@@ -48,7 +53,7 @@ def main():
         
         # Calculate purchases
         print("\nCalculating purchase recommendations...")
-        compras_df = manager.calculate_compras()
+        compras_df = manager.calculate_compras(contemplar_sobre_stock=args.over_stock)
         print(f"✓ Processed {len(compras_df)} items")
         
         # Calculate customer analysis
@@ -68,10 +73,10 @@ def main():
         print(f"Purchase Order Value:    €{stats.get('total_pedido_value', 0):,.2f}")
         print(f"Expected Margin:         €{stats.get('total_pedido_margin', 0):,.2f}")
         
-        for year in (manager.current_year, manager.current_year - 1):
-            key = f'total_sales_Año {year}'
-            if key in stats:
-                print(f"Sales {year}:             €{stats[key]:,.2f}")
+        if 'total_sales_current_year' in stats:
+            print(f"Current Year Sales:      €{stats['total_sales_current_year']:,.2f}")
+        if 'total_sales_prev_year' in stats:
+            print(f"Previous Year Sales:     €{stats['total_sales_prev_year']:,.2f}")
         
         # Export results
         print(f"\nExporting results to: {args.output}")
@@ -101,15 +106,6 @@ def main():
         
     except FileNotFoundError:
         print(f"\n❌ Error: File not found: {args.excel_file}")
-        return 1
-    except MultiColumnMappingError as e:
-        for error in e.errors:
-            print(f"\n❌ {error.input_name}: faltan {', '.join(error.missing)}")
-            print(f"   Columnas disponibles: {', '.join(error.available)}")
-        return 1
-    except ColumnMappingError as e:
-        print(f"\n❌ {e.input_name}: faltan {', '.join(e.missing)}")
-        print(f"   Columnas disponibles: {', '.join(e.available)}")
         return 1
     except Exception as e:
         print(f"\n❌ Error: {str(e)}")
