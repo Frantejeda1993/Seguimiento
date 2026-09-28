@@ -27,7 +27,7 @@ import json
 import gzip
 import base64
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -225,40 +225,11 @@ def require_auth() -> bool:
     return False
 
 
-@st.cache_resource
-def get_firestore_client():
-    """Initialize Firebase Admin SDK and return Firestore client."""
-    service_account, options, _ = _extract_firebase_config()
-    if not service_account:
-        return None
-
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(service_account)
-        firebase_admin.initialize_app(cred, options=options or None)
-
-    return firestore.client()
-
-
-def log_inventory_upload(source: str, stock_file, ventas_file, recepciones_file):
-    """Persist upload metadata in Firestore collection `inventory_uploads`."""
-    db = get_firestore_client()
-    if db is None:
-        return
-
-    upload_doc = {
-        "source": source,
-        "stock_filename": stock_file.name if stock_file else None,
-        "ventas_filename": ventas_file.name if ventas_file else None,
-        "recepciones_filename": recepciones_file.name if recepciones_file else None,
-        "created_at": firestore.SERVER_TIMESTAMP,
-    }
-    db.collection("inventory_uploads").add(upload_doc)
-
-
 @st.cache_data
 def load_sample_data():
     """Generate sample data for demonstration."""
     import numpy as np
+    np.random.seed(42)
     from datetime import datetime, timedelta
     
     # Sample products
@@ -279,7 +250,7 @@ def load_sample_data():
         'Pendiente Entrar Fabricación': np.random.randint(0, 100, 50),
         'En Tránsito': np.random.randint(0, 50, 50),
         'Disponible': np.random.randint(0, 600, 50),
-        'Disponible Teórico': np.random.randint(0, 700, 50),
+        'Disponible Teorico': np.random.randint(0, 700, 50),
         'Situación': np.random.choice(['Active', None], 50, p=[0.7, 0.3]),
         'Ubicación': 'A-01',
         'Ubicación 2': '',
@@ -375,8 +346,8 @@ def _build_last_12_months_top_items(ventas_filtered: pd.DataFrame) -> tuple[pd.D
         .groupby('Artículo', as_index=False)
         .agg(
             {
-                'Marca': lambda x: x.dropna().iloc[0] if not x.dropna().empty else '',
-                'Descripción': lambda x: x.dropna().iloc[0] if not x.dropna().empty else '',
+                'Marca': 'first',
+                'Descripción': 'first',
                 'Unidades Venta': 'sum',
                 'Importe Neto': 'sum'
             }
@@ -692,135 +663,6 @@ def format_eur(value: float | int | None) -> str:
     return f"€ {formatted}"
 
 
-def _resolve_current_year_cutoff(ventas_df: pd.DataFrame, current_year: int) -> datetime | None:
-    """Get latest invoice date in current year to build YoY comparisons to date."""
-    current_year_sales = ventas_df[ventas_df['Año Factura'] == current_year].copy()
-    if current_year_sales.empty:
-        return None
-
-    cutoff_date = None
-    if 'Fecha Factura' in current_year_sales.columns:
-        parsed_dates = pd.to_datetime(current_year_sales['Fecha Factura'], errors='coerce')
-        parsed_dates = parsed_dates.dropna()
-        if not parsed_dates.empty:
-            cutoff_date = parsed_dates.max().to_pydatetime()
-
-    if cutoff_date is None and 'Mes Factura' in current_year_sales.columns:
-        month_series = pd.to_numeric(current_year_sales['Mes Factura'], errors='coerce').dropna()
-        if not month_series.empty:
-            cutoff_month = int(month_series.max())
-            cutoff_date = datetime(current_year, cutoff_month, 1) + pd.offsets.MonthEnd(0)
-            cutoff_date = cutoff_date.to_pydatetime()
-
-    return cutoff_date
-
-
-def _sum_sales_to_cutoff_previous_year(ventas_df: pd.DataFrame, previous_year: int, cutoff_date: datetime | None) -> pd.Series:
-    """Aggregate previous-year sales per customer up to the same month/day as current-year cutoff."""
-    previous_year_sales = ventas_df[ventas_df['Año Factura'] == previous_year].copy()
-    if previous_year_sales.empty:
-        return pd.Series(dtype='float64')
-
-    if cutoff_date is not None and 'Fecha Factura' in previous_year_sales.columns:
-        prev_dates = pd.to_datetime(previous_year_sales['Fecha Factura'], errors='coerce')
-        cutoff_prev = cutoff_date.replace(year=previous_year)
-        valid_mask = prev_dates.notna() & (prev_dates.dt.date <= cutoff_prev.date())
-        previous_year_sales = previous_year_sales[valid_mask]
-    elif cutoff_date is not None and 'Mes Factura' in previous_year_sales.columns:
-        previous_year_sales['Mes Factura'] = pd.to_numeric(previous_year_sales['Mes Factura'], errors='coerce')
-        previous_year_sales = previous_year_sales[previous_year_sales['Mes Factura'] <= cutoff_date.month]
-
-    if previous_year_sales.empty:
-        return pd.Series(dtype='float64')
-
-    return previous_year_sales.groupby('Cliente')['Importe Neto'].sum()
-
-
-def calculate_clientes_from_ventas(ventas_df: pd.DataFrame, current_year: int) -> pd.DataFrame:
-    """Build customer analysis from a (possibly filtered) sales dataframe."""
-    if ventas_df is None or ventas_df.empty:
-        return pd.DataFrame(columns=["Cod", "Cliente"])
-
-    customers = ventas_df['Cliente'].dropna().unique()
-    clientes = pd.DataFrame({'Cod': customers})
-
-    name_map = ventas_df.groupby('Cliente')['Nombre Cliente'].first()
-    clientes['Cliente'] = clientes['Cod'].map(name_map)
-
-    for year_offset in [2, 1, 0]:
-        year = current_year - year_offset
-        year_sales = ventas_df[
-            ventas_df['Año Factura'] == year
-        ].groupby('Cliente')['Importe Neto'].sum()
-        clientes[f'Año {year}'] = clientes['Cod'].map(year_sales).fillna(0)
-
-    year_cols = [f'Año {current_year - i}' for i in [2, 1, 0]]
-    clientes[f'Dif {current_year - 2} - {current_year - 1}'] = clientes.apply(
-        lambda row: (row[year_cols[1]] - row[year_cols[0]]) / row[year_cols[0]]
-        if row[year_cols[0]] != 0 else 1,
-        axis=1
-    )
-    cutoff_date = _resolve_current_year_cutoff(ventas_df, current_year)
-    previous_year_to_date_sales = _sum_sales_to_cutoff_previous_year(
-        ventas_df,
-        current_year - 1,
-        cutoff_date,
-    )
-    clientes[f'Año {current_year - 1} (to date)'] = clientes['Cod'].map(previous_year_to_date_sales).fillna(0)
-
-    previous_year_to_date_col = f'Año {current_year - 1} (to date)'
-    clientes[f'Dif {current_year - 1} - {current_year}'] = clientes.apply(
-        lambda row: (row[year_cols[2]] - row[previous_year_to_date_col]) / row[previous_year_to_date_col]
-        if row[previous_year_to_date_col] != 0 else 1,
-        axis=1
-    )
-
-    return clientes
-
-
-def calculate_clientes_monthly_from_ventas(ventas_df: pd.DataFrame, current_year: int, current_month: int) -> pd.DataFrame:
-    """Build customer analysis comparing the latest 3 months."""
-    if ventas_df is None or ventas_df.empty:
-        return pd.DataFrame(columns=["Cod", "Cliente"])
-
-    customers = ventas_df['Cliente'].dropna().unique()
-    clientes = pd.DataFrame({'Cod': customers})
-
-    name_map = ventas_df.groupby('Cliente')['Nombre Cliente'].first()
-    clientes['Cliente'] = clientes['Cod'].map(name_map)
-
-    month_points = []
-    for offset in [2, 1, 0]:
-        month_value = current_month - offset
-        year_value = current_year
-        if month_value <= 0:
-            month_value += 12
-            year_value -= 1
-        month_points.append((year_value, month_value))
-
-    month_cols = []
-    for year_value, month_value in month_points:
-        col_name = f"Mes {year_value}-{month_value:02d}"
-        month_sales = ventas_df[
-            (ventas_df['Año Factura'] == year_value) & (ventas_df['Mes Factura'] == month_value)
-        ].groupby('Cliente')['Importe Neto'].sum()
-        clientes[col_name] = clientes['Cod'].map(month_sales).fillna(0)
-        month_cols.append(col_name)
-
-    clientes[f'Dif {month_cols[0]} - {month_cols[1]}'] = clientes.apply(
-        lambda row: (row[month_cols[1]] - row[month_cols[0]]) / row[month_cols[0]]
-        if row[month_cols[0]] != 0 else 1,
-        axis=1
-    )
-    clientes[f'Dif {month_cols[1]} - {month_cols[2]}'] = clientes.apply(
-        lambda row: (row[month_cols[2]] - row[month_cols[1]]) / row[month_cols[1]]
-        if row[month_cols[1]] != 0 else 1,
-        axis=1
-    )
-
-    return clientes
-
-
 def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     """Convert a dataframe to a single-sheet Excel file in memory."""
     output = io.BytesIO()
@@ -922,13 +764,7 @@ def main():
             max_value=6.0,
             value=2.0,
             step=0.1,
-            help="Number of months to calculate purchase needs"
-        )
-        
-        contemplar_sobre_stock = st.checkbox(
-            "Consider Over-Stock",
-            value=False,
-            help="Include items that are over-stocked in recommendations"
+            help="Horizonte de cobertura en meses (plazo de entrega + periodo de revisión). Filtra por marca para ajustarlo al proveedor"
         )
 
         st.divider()
@@ -1144,33 +980,44 @@ def main():
         manager = st.session_state.manager
         manager.meses_compras = float(meses_compras)
         
-        # Calculate analysis
-        with st.spinner("Calculating..."):
-            try:
-                compras_df = manager.calculate_compras(
-                    contemplar_sobre_stock,
-                    column_overrides=st.session_state.get("column_overrides"),
-                )
-            except MultiColumnMappingError as multi_err:
-                dataframes = {
-                    "Ventas": manager.ventas_df if manager.ventas_df is not None else pd.DataFrame(),
-                    "Stock": manager.stock_df if manager.stock_df is not None else pd.DataFrame(),
-                }
-                if render_column_mapping_form(multi_err.errors, manager, dataframes=dataframes):
-                    st.rerun()
-                return
-            except ColumnMappingError as cme:
-                dataframes = {
-                    "Ventas": manager.ventas_df if manager.ventas_df is not None else pd.DataFrame(),
-                    "Stock": manager.stock_df if manager.stock_df is not None else pd.DataFrame(),
-                }
-                if render_column_mapping_form([cme], manager, dataframes=dataframes):
-                    st.rerun()
-                return
-            except Exception as e:
-                st.error(f"Error in calculations: {str(e)}")
-                return
-
+        # Recalcular sólo al cargar datos nuevos o modificar los parámetros. Así
+        # los filtros y widgets no vuelven a ejecutar el forecast completo.
+        overrides = st.session_state.get("column_overrides") or {}
+        cache_key = (
+            id(manager.stock_df), id(manager.ventas_df), id(manager.recepciones_df),
+            float(meses_compras), json.dumps(overrides, sort_keys=True, default=str),
+        )
+        if st.session_state.get("compras_cache_key") == cache_key:
+            compras_df = st.session_state["compras_cache"]
+        else:
+            # Calculate analysis
+            with st.spinner("Calculating..."):
+                try:
+                    compras_df = manager.calculate_compras(
+                        column_overrides=overrides,
+                    )
+                    st.session_state["compras_cache_key"] = cache_key
+                    st.session_state["compras_cache"] = compras_df
+                except MultiColumnMappingError as multi_err:
+                    dataframes = {
+                        "Ventas": manager.ventas_df if manager.ventas_df is not None else pd.DataFrame(),
+                        "Stock": manager.stock_df if manager.stock_df is not None else pd.DataFrame(),
+                    }
+                    if render_column_mapping_form(multi_err.errors, manager, dataframes=dataframes):
+                        st.rerun()
+                    return
+                except ColumnMappingError as cme:
+                    dataframes = {
+                        "Ventas": manager.ventas_df if manager.ventas_df is not None else pd.DataFrame(),
+                        "Stock": manager.stock_df if manager.stock_df is not None else pd.DataFrame(),
+                    }
+                    if render_column_mapping_form([cme], manager, dataframes=dataframes):
+                        st.rerun()
+                    return
+                except Exception as e:
+                    st.error(f"Error in calculations: {str(e)}")
+                    return
+    
         # Global filters (apply to all tabs)
         st.subheader("🌐 Filtros globales")
         available_brands = sorted(compras_df['Marca'].dropna().unique()) if 'Marca' in compras_df.columns else []
@@ -1192,12 +1039,12 @@ def main():
                 selected_articles = set(ventas_filtered['Artículo'].dropna().unique())
                 stock_filtered = stock_filtered[stock_filtered['Artículo'].isin(selected_articles)]
 
-        clientes_df = calculate_clientes_from_ventas(ventas_filtered, manager.current_year)
-        clientes_monthly_df = calculate_clientes_monthly_from_ventas(
-            ventas_filtered,
-            manager.current_year,
-            manager.current_month,
-        )
+        from clientes import build_clientes_table
+        # Managers retained in Streamlit session state can predate the `today`
+        # attribute introduced in the forecasting release.  Keep those sessions
+        # usable instead of failing while rendering the customer tab.
+        as_of = getattr(manager, "today", date.today())
+        clientes_df = build_clientes_table(ventas_filtered, as_of)
 
         month_m2 = manager.current_month - 2 if manager.current_month > 2 else manager.current_month - 2 + 12
         year_m2 = manager.current_year if manager.current_month > 2 else manager.current_year - 1
@@ -1322,11 +1169,10 @@ def main():
         }
 
         # Tabs for different sections
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab1, tab2, tab3, tab5 = st.tabs([
             "📊 Dashboard",
             "🛒 Purchase Orders",
-            "👥 Customers",
-            "👥 Customers Monthly",
+            "👥 Seguimiento clientes",
             "📁 Export"
         ])
         
@@ -1555,121 +1401,58 @@ def main():
                 st.metric("Total Margin", format_eur(filtered_df['MARGEN PEDIDO'].sum()))
         
         with tab3:
-            st.header("👥 Customer Analysis")
-            
-            # Keep numeric dtypes for correct sorting and apply visual formatting in Streamlit
-            clientes_column_config = {}
-            for col in clientes_df.columns:
-                if 'Año' in col:
-                    clientes_column_config[col] = st.column_config.NumberColumn(col, format="€ %.2f")
-                if 'Dif' in col:
-                    clientes_column_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
-            st.dataframe(
-                clientes_df,
-                use_container_width=True,
-                height=600,
-                column_config=clientes_column_config,
-            )
-            
-            # Top customers chart
-            st.subheader("Top 10 Customers by Current Year Sales")
-            current_year_col = f'Año {manager.current_year}'
-            if current_year_col in clientes_df.columns:
-                top_customers = clientes_df.nlargest(10, current_year_col)
-                fig = px.bar(
-                    top_customers,
-                    x='Cliente',
-                    y=current_year_col,
-                    color=current_year_col,
-                    color_continuous_scale='Greens'
-                )
-                fig.update_layout(showlegend=False, height=400)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        with tab4:
-            st.header("👥 Customer Monthly Analysis")
-
-            clientes_monthly_column_config = {}
-            for col in clientes_monthly_df.columns:
-                if col.startswith('Mes '):
-                    clientes_monthly_column_config[col] = st.column_config.NumberColumn(col, format="€ %.2f")
-                if 'Dif' in col:
-                    clientes_monthly_column_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
-            st.dataframe(
-                clientes_monthly_df,
-                use_container_width=True,
-                height=600,
-                column_config=clientes_monthly_column_config,
-            )
-
-            st.subheader("Top 10 Customers by Last Month Sales")
-            latest_month_cols = [col for col in clientes_monthly_df.columns if col.startswith('Mes ')]
-            if latest_month_cols:
-                top_col = latest_month_cols[-1]
-                top_customers = clientes_monthly_df.nlargest(10, top_col)
-                fig = px.bar(
-                    top_customers,
-                    x='Cliente',
-                    y=top_col,
-                    color=top_col,
-                    color_continuous_scale='Teal'
-                )
-                fig.update_layout(showlegend=False, height=400)
-                st.plotly_chart(fig, use_container_width=True)
+            from clientes import MESES, client_sku_drivers
+            st.header("👥 Seguimiento clientes")
+            f1, f2, f3 = st.columns(3)
+            with f1: selected_tendencia = st.multiselect("Filtrar por Tendencia", sorted(clientes_df['Tendencia'].dropna().unique()), default=[])
+            with f2: selected_abc = st.multiselect("Filtrar por ABC", sorted(clientes_df['ABC'].dropna().unique()), default=[])
+            with f3: search_term = st.text_input("🔍 Buscar cliente (código o nombre)", "")
+            clientes_display = clientes_df.copy()
+            if selected_tendencia: clientes_display = clientes_display[clientes_display.Tendencia.isin(selected_tendencia)]
+            if selected_abc: clientes_display = clientes_display[clientes_display.ABC.isin(selected_abc)]
+            if search_term.strip():
+                clientes_display = clientes_display[clientes_display.Cod.astype(str).str.contains(search_term, case=False, na=False) | clientes_display.Cliente.astype(str).str.contains(search_term, case=False, na=False)]
+            activos = int(clientes_df.L3M.gt(0).sum()); perdidos = int(clientes_df.Tendencia.eq('Sin compra reciente').sum()); ytd_total = clientes_df.YTD.sum(); ytd_py_total = clientes_df.YTD_PY.sum()
+            k1,k2,k3,k4=st.columns(4); k1.metric("Clientes activos (L3M)", activos); k2.metric("Clientes sin compra reciente", perdidos); k3.metric("YTD Total", format_eur(ytd_total)); k4.metric("Variación YTD vs PY", f"{(ytd_total-ytd_py_total)/ytd_py_total:+.1%}" if ytd_py_total else "N/A")
+            if not clientes_df.empty:
+                st.markdown("🏆 Top 5: " + " · ".join(f"**{r.Cliente}** ({format_eur(r.YTD)})" for _,r in clientes_df.nlargest(5,'YTD').iterrows()))
+            priority = ['Ranking YTD','ABC','Cod','Cliente','YTD','YTD_PY','Var_YTD_%','L3M','L3M_PY','Var_L3M_YoY_%','Tendencia','Cambio Ranking','Ticket Medio','Recurrencia %','Cuota_%','Meses_sin_compra','Mes en curso (parcial)']
+            ordered = [c for c in priority if c in clientes_display] + [c for c in clientes_display if c not in priority]
+            config = {c: st.column_config.NumberColumn(c, format="€ %.2f") for c in clientes_display if c in {'YTD','YTD_PY','L3M','L3M_PY','Mes en curso (parcial)','Ticket Medio'} or c.startswith('Año ') or c in MESES}
+            config.update({c: st.column_config.NumberColumn(c, format="%.1f%%") for c in clientes_display if '%' in c or c in {'Recurrencia %','Cuota_%'}})
+            st.dataframe(clientes_display[ordered], use_container_width=True, height=700, column_config=config)
+            c1,c2=st.columns(2)
+            with c1:
+                chart = pd.melt(clientes_df.nlargest(15,'YTD')[['Cliente','YTD','YTD_PY']], id_vars='Cliente', var_name='Periodo', value_name='Importe')
+                st.plotly_chart(px.bar(chart,x='Cliente',y='Importe',color='Periodo',barmode='group',color_discrete_map={'YTD':'#2ecc71','YTD_PY':'#95a5a6'}), use_container_width=True)
+            with c2:
+                st.plotly_chart(px.bar(clientes_df.nlargest(10,'YTD'),x='Cliente',y='YTD',color='YTD',color_continuous_scale='Greens'), use_container_width=True)
+            with st.expander("🔎 Detalle SKU por cliente — ¿Qué productos suben/bajan?"):
+                choices = clientes_df.Cod.tolist(); selected = st.multiselect("Seleccionar cliente(s) para analizar", choices, max_selections=5, format_func=lambda cod: f"{cod} — {clientes_df.loc[clientes_df.Cod==cod,'Cliente'].iloc[0]}")
+                if selected:
+                    up, down = client_sku_drivers(ventas_filtered, selected, getattr(manager,'today',date.today()), top=10); x,y=st.columns(2); x.dataframe(up,use_container_width=True,hide_index=True); y.dataframe(down,use_container_width=True,hide_index=True)
 
         with tab5:
+            from inventory_manager import get_export_compras_columns
             st.header("📁 Export Results")
-            
-            st.write("Download your analysis results in Excel format")
-            
-            # Create Excel file in memory
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                compras_filtered.to_excel(writer, sheet_name='COMPRAS', index=False)
+            st.write("Descarga los resultados del análisis en Excel")
+            available_cols = [c for c in get_export_compras_columns(manager.current_year) if c in compras_filtered]
+            compras_export = compras_filtered[available_cols].copy()
+            clean = io.BytesIO()
+            with pd.ExcelWriter(clean, engine='openpyxl') as writer:
+                compras_export.to_excel(writer, sheet_name='COMPRAS', index=False)
                 clientes_df.to_excel(writer, sheet_name='CLIENTES', index=False)
-                clientes_monthly_df.to_excel(writer, sheet_name='CLIENTES_MENSUAL', index=False)
-            
-            output.seek(0)
-            
-            st.download_button(
-                label="📥 Download Excel Report",
-                data=output,
-                file_name=f"inventory_report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
-            
-            st.divider()
-            
-            # Individual exports
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                compras_excel = dataframe_to_excel_bytes(compras_filtered, 'COMPRAS')
-                st.download_button(
-                    "📄 Download Purchases (Excel)",
-                    compras_excel,
-                    f"compras_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            
-            with col2:
-                clientes_excel = dataframe_to_excel_bytes(clientes_df, 'CLIENTES')
-                st.download_button(
-                    "📄 Download Customers (Excel)",
-                    clientes_excel,
-                    f"clientes_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-            with col3:
-                clientes_monthly_excel = dataframe_to_excel_bytes(clientes_monthly_df, 'CLIENTES_MENSUAL')
-                st.download_button(
-                    "📄 Download Customers Monthly (Excel)",
-                    clientes_monthly_excel,
-                    f"clientes_mensual_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            st.download_button("📥 Descargar Pedido (columnas esenciales)", clean.getvalue(), f"pedido_{pd.Timestamp.now():%Y%m%d_%H%M%S}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+            st.caption(f"Incluye {len(available_cols)} columnas: SKU, Marca, histórico ventas, stock, pedido, motivo y alertas.")
+            st.divider(); st.subheader("Export completo (debug / auditoría)")
+            full = io.BytesIO()
+            with pd.ExcelWriter(full, engine='openpyxl') as writer:
+                compras_filtered.to_excel(writer, sheet_name='COMPRAS_FULL', index=False)
+                clientes_df.to_excel(writer, sheet_name='CLIENTES', index=False)
+            st.download_button("📥 Descargar Export completo (todas las columnas)", full.getvalue(), f"full_export_{pd.Timestamp.now():%Y%m%d_%H%M%S}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            col1,col2=st.columns(2)
+            with col1: st.download_button("📄 Solo Pedido (Excel)", dataframe_to_excel_bytes(compras_export,'COMPRAS'), f"compras_{pd.Timestamp.now():%Y%m%d}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            with col2: st.download_button("📄 Solo Clientes (Excel)", dataframe_to_excel_bytes(clientes_df,'CLIENTES'), f"clientes_{pd.Timestamp.now():%Y%m%d}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 if __name__ == "__main__":
