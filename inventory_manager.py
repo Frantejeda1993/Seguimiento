@@ -5,8 +5,7 @@ Replicates Excel functionality with improved performance
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, date
-import warnings
+from datetime import datetime
 from typing import Dict, Tuple
 import re
 import unicodedata
@@ -34,7 +33,6 @@ REQUIRED_VENTAS_COLUMNS: Dict[str, Tuple[str, ...]] = {
     'Descripción Artículo': ('Descripción Artículo', 'Descripcion Articulo'),
     'Precio Coste':         ('Precio Coste',),
     'Nombre Cliente':       ('Nombre Cliente', 'Nombre_Cliente'),
-    'Cliente':              ('Cliente',),
     'Año Factura':          ('Año Factura', 'Ano Factura', 'Año_Factura'),
     'Mes Factura':          ('Mes Factura', 'Mes_Factura'),
     'Importe Neto':         ('Importe Neto', 'Importe_Neto'),
@@ -91,11 +89,10 @@ class InventoryManager:
     Replicates the Excel SEGUIMIENTO functionality.
     """
 
-    def __init__(self, meses_compras: float = 2, today: date | datetime | None = None):
+    def __init__(self, meses_compras: float = 2):
         self.meses_compras = float(meses_compras)
-        self.today = today or date.today()
-        self.current_month = self.today.month
-        self.current_year = self.today.year
+        self.current_month = datetime.now().month
+        self.current_year = datetime.now().year
 
         self.stock_df = None
         self.recepciones_df = None
@@ -265,67 +262,99 @@ class InventoryManager:
     # ------------------------------------------------------------------
 
     def calculate_compras(
-        self, contemplar_sobre_stock: bool | None = None,
+        self,
+        contemplar_sobre_stock: bool = False,
         column_overrides: dict[str, dict[str, str]] | None = None,
-        metodo_pedido: str = "propuesto",
     ) -> pd.DataFrame:
-        """Calcula pedidos propuestos y conserva el algoritmo anterior para comparar."""
-        from forecasting import (ForecastConfig, build_monthly_matrix, build_motivo,
-                                 calcular_pedido, closed_end, forecast_sku, tendencia_label)
-        if contemplar_sobre_stock is not None:
-            warnings.warn("contemplar_sobre_stock está deprecado e ignorado", DeprecationWarning, stacklevel=2)
-        if metodo_pedido not in {"propuesto", "actual"}:
-            raise ValueError("metodo_pedido debe ser 'propuesto' o 'actual'")
         if self.ventas_df is None or self.stock_df is None:
             raise ValueError("Sales and stock data must be loaded first")
-        ventas_map, stock_map = self._validate_all_inputs(column_overrides or {})
-        ventas=self.ventas_df.rename(columns={v:k for k,v in ventas_map.items()}).copy()
-        stock=self.stock_df.rename(columns={v:k for k,v in stock_map.items()}).copy()
-        for c in ('Unidades Venta','Precio Coste','Importe Neto','Margen'): ventas[c]=pd.to_numeric(ventas[c],errors='coerce').fillna(0)
-        for c in ('Stock','Cartera','Reservas','Pendiente Recibir Compra','Pendiente Entrar Fabricación','En Tránsito'): stock[c]=pd.to_numeric(stock[c],errors='coerce').fillna(0)
-        skus=pd.Index(ventas['Artículo']).union(pd.Index(stock['Artículo'])).unique(); compras=pd.DataFrame({'SKU':skus})
-        for target,col in [('Marca','Clave 1'),('Descripción','Descripción Artículo')]: compras[target]=compras.SKU.map(ventas.groupby('Artículo')[col].first())
-        cutoff=closed_end(ventas,self.today); periods=pd.to_datetime(dict(year=ventas['Año Factura'].astype(int), month=ventas['Mes Factura'].astype(int), day=1)).dt.to_period('M'); recent=ventas.loc[(periods<=cutoff)&(periods>=cutoff-11)]
-        base=recent if not recent.empty else ventas
-        def weighted(frame, value, weight):
-            """Media ponderada vectorizada, evitando un ``apply`` por SKU."""
-            weights = frame[weight]
-            numerator = (frame[value] * weights).groupby(frame['Artículo']).sum()
-            denominator = weights.groupby(frame['Artículo']).sum().replace(0, np.nan)
-            return numerator / denominator
-        compras['Precio Compra']=compras.SKU.map(weighted(base,'Precio Coste','Unidades Venta')).fillna(compras.SKU.map(ventas.groupby('Artículo')['Precio Coste'].mean())).fillna(0)
-        compras['Margen']=compras.SKU.map(weighted(base,'Margen','Importe Neto')).fillna(compras.SKU.map(ventas.groupby('Artículo')['Margen'].mean())).fillna(0)
-        margen_es_porcentaje = compras.Margen.dropna().median() > 1.5
-        revenue=base.groupby('Artículo')['Importe Neto'].sum(); units=base.groupby('Artículo')['Unidades Venta'].sum().replace(0,np.nan); compras['Precio Venta medio']=compras.SKU.map(revenue/units).fillna(0)
-        indexed=stock.drop_duplicates('Artículo').set_index('Artículo'); compras['Estado']=compras.SKU.map(indexed['Situación']).fillna('')
-        compras['Stock']=compras.SKU.map(indexed['Stock']).fillna(0); compras['Stock Unidades']=compras['Stock']
-        compras=self._attach_stock_units_and_value(compras,stock)
-        compras['Cartera']=compras.SKU.map(indexed['Cartera']).fillna(0); compras['Reservas']=compras.SKU.map(indexed['Reservas']).fillna(0); compras['Comprometido']=compras.Cartera+compras.Reservas; compras['Pendiente Servir']=compras.Comprometido
-        compras['Pendiente Recibir']=self._calc_pending_receive(compras.SKU,stock); compras['Disponible Teorico']=compras.Stock+compras['Pendiente Recibir']-compras.Comprometido; compras['Disponible Teórico']=compras['Disponible Teorico']
-        # Legacy output remains available, but it no longer supplies Meses de Stock.
-        legacy=self._calculate_sales_metrics(compras.copy(),ventas); avg=f'Promedio {self.current_year-2} - {self.current_year}'; cur=f'Ventas {self.current_year}'; legacy['COMPRAR']=legacy.Estado.astype(str).str.strip().eq(''); compras['PEDIDO ACTUAL']=self._calculate_pedido_legacy(legacy,avg,cur)
-        # Preserve the legacy monthly/annual sales fields in the purchase export.
-        sales_columns = [c for c in legacy.columns if c.startswith('Ventas ') or c.startswith('Promedio ')]
-        compras[sales_columns] = legacy[sales_columns]
-        matrix=build_monthly_matrix(ventas,self.recepciones_df,cutoff); cfg=ForecastConfig(horizon_months=self.meses_compras)
-        records=[]
-        for sku in compras.SKU:
-            fc=forecast_sku(matrix.loc[sku].dropna().values if sku in matrix.index else [],cfg); records.append(fc)
-        fcdf=pd.DataFrame(records); compras['Meses activos']=fcdf.n_meses; compras['Meses con venta 12M']=fcdf.meses_con_venta; compras['Demanda prevista H']=fcdf.demanda_H; compras['Demanda mensual prevista']=fcdf.demanda_H/self.meses_compras; compras['Tendencia %/mes']=fcdf.tendencia_pct; compras['Tendencia']=fcdf.tendencia_pct.map(tendencia_label); compras['Patrón demanda']=fcdf.patron; compras['Stock Seguridad']=fcdf.ss
-        compras['Demanda 12M']=compras.SKU.map(recent.groupby('Artículo')['Unidades Venta'].sum()).fillna(0)
-        vals=[calcular_pedido(fc, row.Stock,row['Pendiente Recibir'],row.Cartera,row.Reservas,str(row.Estado).strip()=="") for fc,(_,row) in zip(records,compras.iterrows())]
-        compras['PEDIDO']=[v[0] for v in vals]; compras['Faltante']=[v[2] for v in vals]; compras['Necesidad']=[v[3] for v in vals]
-        compras['Meses de Stock']=np.where(compras['Demanda mensual prevista']>0,np.maximum(compras['Disponible Teorico'],0)/compras['Demanda mensual prevista'],np.nan)
-        compras['Dif PEDIDO']=compras.PEDIDO-compras['PEDIDO ACTUAL']; do=compras.Estado.astype(str).str.strip().isin(['D','O']); compras['Alerta']=np.select([do&(compras.Faltante>0),do&(compras.Stock>0)&compras['Patrón demanda'].isin(['SIN_ROTACION','ESPORADICO']),compras['Patrón demanda'].isin(['NUEVO','REACTIVADO','ESPORADICO'])&((compras.PEDIDO>0)|(compras.Faltante>0))],['FALTANTE_DO','LIQUIDACION','REVISAR'],'')
-        compras['Meses de compra']=self.meses_compras; compras['Motivo']=compras.apply(build_motivo,axis=1); active='PEDIDO' if metodo_pedido=='propuesto' else 'PEDIDO ACTUAL'; compras['VALOR PEDIDO']=compras[active]*compras['Precio Compra']
-        margen_factor = compras['Margen'] / 100 if margen_es_porcentaje else compras['Margen']
-        # Equivale a PEDIDO × Precio Venta medio × (1 - (100 - Margen) / 100).
-        compras['MARGEN PEDIDO']=compras[active]*compras['Precio Venta medio']*margen_factor
-        self.compras_df=compras; return compras
 
-    def _calculate_pedido_legacy(self, compras, avg_3y_col, current_year_col):
-        """Algoritmo histórico conservado exclusivamente en PEDIDO ACTUAL."""
-        return self._calculate_pedido_vectorized(compras, False, avg_3y_col, current_year_col)
+        column_overrides = column_overrides or {}
+
+        # Resolve + validate all columns at once
+        ventas_map, stock_map = self._validate_all_inputs(column_overrides)
+
+        # ---- Rename ventas/stock columns to canonical names ----
+        ventas = self.ventas_df.rename(columns={v: k for k, v in ventas_map.items()})
+        stock = self.stock_df.rename(columns={v: k for k, v in stock_map.items()})
+
+        # Get unique SKUs from sales
+        skus = ventas['Artículo'].unique()
+        compras = pd.DataFrame({'SKU': skus})
+
+        # Brand / Marca
+        compras['Marca'] = compras['SKU'].map(ventas.groupby('Artículo')['Clave 1'].first())
+
+        # Description
+        compras['Descripción'] = compras['SKU'].map(
+            ventas.groupby('Artículo')['Descripción Artículo'].first()
+        )
+
+        # Purchase price
+        compras['Precio Compra'] = compras['SKU'].map(
+            ventas.groupby('Artículo')['Precio Coste'].mean()
+        )
+
+        # Margin — now always available via the canonical 'Margen' column
+        compras['Margen'] = compras['SKU'].map(
+            ventas.groupby('Artículo')['Margen'].mean()
+        )
+
+        # Stock status
+        compras['Estado'] = compras['SKU'].map(
+            stock.set_index('Artículo')['Situación'].to_dict()
+        )
+
+        # Last reception date
+        if self.recepciones_df is not None and not self.recepciones_df.empty:
+            last_recep = self.recepciones_df.groupby('Artículo')['Fecha Recepción'].max()
+            compras['Ultima recepción'] = compras['SKU'].map(last_recep)
+        else:
+            compras['Ultima recepción'] = None
+
+        # Stock units and value — prefer dedicated stock_value sheet
+        compras = self._attach_stock_units_and_value(compras, stock)
+
+        # Pending to serve (Cartera + Reservas)
+        cartera_map = stock.set_index('Artículo')['Cartera'].fillna(0).to_dict()
+        reservas_map = stock.set_index('Artículo')['Reservas'].fillna(0).to_dict()
+        compras['Pendiente Servir'] = compras['SKU'].map(
+            lambda x: cartera_map.get(x, 0) + reservas_map.get(x, 0)
+        )
+
+        # Pending to receive
+        compras['Pendiente Recibir'] = self._calc_pending_receive(compras['SKU'], stock)
+
+        # Theoretical available
+        compras['Disponible Teorico'] = (
+            compras['Stock Unidades']
+            + compras['Pendiente Recibir']
+            - compras['Pendiente Servir']
+        )
+
+        # Sales metrics (uses canonical ventas columns)
+        compras = self._calculate_sales_metrics(compras, ventas)
+
+        # Months of stock
+        avg_3y_col = f'Promedio {self.current_year - 2} - {self.current_year}'
+        current_year_col = f'Ventas {self.current_year}'
+
+        denom = compras[avg_3y_col] - compras['Disponible Teorico'] - compras[current_year_col]
+        compras['Meses de Stock'] = np.where(denom > 0, compras['Disponible Teorico'] / denom, 0)
+
+        # Purchase flag
+        compras['COMPRAR'] = compras['Estado'].isna()
+
+        # Order quantity (vectorized)
+        compras['PEDIDO'] = self._calculate_pedido_vectorized(
+            compras, contemplar_sobre_stock, avg_3y_col, current_year_col
+        )
+
+        compras['VALOR PEDIDO'] = compras['PEDIDO'] * compras['Precio Compra']
+        compras['MARGEN PEDIDO'] = compras['PEDIDO'] * compras['Margen']
+
+        self.compras_df = compras
+        return compras
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -351,12 +380,8 @@ class InventoryManager:
                         amount_col: lambda s: pd.to_numeric(s, errors='coerce').fillna(0).sum(),
                     })
                 )
-                compras['Stock Unidades (valor)'] = compras['SKU'].map(
-                    agg.set_index(article_col)[units_col].to_dict()
-                ).fillna(0)
-                # Physical stock always comes from the Stock input sheet.
                 compras['Stock Unidades'] = compras['SKU'].map(
-                    stock.set_index('Artículo')['Stock'].to_dict()
+                    agg.set_index(article_col)[units_col].to_dict()
                 ).fillna(0)
                 compras['Stock Valor'] = compras['SKU'].map(
                     agg.set_index(article_col)[amount_col].to_dict()
@@ -368,19 +393,7 @@ class InventoryManager:
             stock.set_index('Artículo')['Stock'].to_dict()
         ).fillna(0)
         compras['Stock Valor'] = compras['Stock Unidades'] * compras['Precio Compra']
-        compras['Stock Unidades (valor)'] = compras['Stock Unidades']
         return compras
-
-    @staticmethod
-    def reconcile_stock(compras: pd.DataFrame) -> pd.DataFrame:
-        """Devuelve SKUs cuya valoración no coincide con el stock físico."""
-        required = {'SKU', 'Stock Unidades', 'Stock Unidades (valor)'}
-        if not required.issubset(compras.columns):
-            return pd.DataFrame(columns=['SKU', 'Stock Unidades', 'Stock Unidades (valor)', 'Diferencia Stock'])
-        result = compras.loc[(compras['Stock Unidades'] - compras['Stock Unidades (valor)']).abs() > 0,
-                             ['SKU', 'Stock Unidades', 'Stock Unidades (valor)']].copy()
-        result['Diferencia Stock'] = result['Stock Unidades'] - result['Stock Unidades (valor)']
-        return result
 
     def _calc_pending_receive(
         self, skus: pd.Series, stock: pd.DataFrame
@@ -530,13 +543,39 @@ class InventoryManager:
         return np.where(should_zero, 0, rounded)
 
     def calculate_clientes(self) -> pd.DataFrame:
-        """Calcula la tabla única de clientes usando meses cerrados comparables."""
-        if self.ventas_df is None: raise ValueError("Sales data must be loaded first")
-        from clientes import build_clientes_table
-        ventas_map=self._resolve_columns('Ventas', self.ventas_df, REQUIRED_VENTAS_COLUMNS)
-        ventas=self.ventas_df.rename(columns={v:k for k,v in ventas_map.items()})
-        self.clientes_df=build_clientes_table(ventas,self.today)
-        return self.clientes_df
+        if self.ventas_df is None:
+            raise ValueError("Sales data must be loaded first")
+
+        customers = self.ventas_df['Cliente'].unique()
+        clientes = pd.DataFrame({'Cod': customers})
+
+        name_map = self.ventas_df.groupby('Cliente')['Nombre Cliente'].first()
+        clientes['Cliente'] = clientes['Cod'].map(name_map)
+
+        for year_offset in [2, 1, 0]:
+            year = self.current_year - year_offset
+            year_sales = (
+                self.ventas_df[self.ventas_df['Año Factura'] == year]
+                .groupby('Cliente')['Importe Neto']
+                .sum()
+            )
+            clientes[f'Año {year}'] = clientes['Cod'].map(year_sales).fillna(0)
+
+        year_cols = [f'Año {self.current_year - i}' for i in [2, 1, 0]]
+
+        clientes[f'Dif {self.current_year - 2} - {self.current_year - 1}'] = clientes.apply(
+            lambda row: (row[year_cols[1]] - row[year_cols[0]]) / row[year_cols[0]]
+            if row[year_cols[0]] != 0 else 1,
+            axis=1,
+        )
+        clientes[f'Dif {self.current_year - 1} - {self.current_year}'] = clientes.apply(
+            lambda row: (row[year_cols[2]] - row[year_cols[1]]) / row[year_cols[1]]
+            if row[year_cols[1]] != 0 else 1,
+            axis=1,
+        )
+
+        self.clientes_df = clientes
+        return clientes
 
     def get_summary_stats(self) -> Dict:
         stats = {}
