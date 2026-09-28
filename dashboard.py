@@ -225,6 +225,36 @@ def require_auth() -> bool:
     return False
 
 
+@st.cache_resource
+def get_firestore_client():
+    """Initialize Firebase Admin SDK and return Firestore client."""
+    service_account, options, _ = _extract_firebase_config()
+    if not service_account:
+        return None
+
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(service_account)
+        firebase_admin.initialize_app(cred, options=options or None)
+
+    return firestore.client()
+
+
+def log_inventory_upload(source: str, stock_file, ventas_file, recepciones_file):
+    """Persist upload metadata in Firestore collection `inventory_uploads`."""
+    db = get_firestore_client()
+    if db is None:
+        return
+
+    upload_doc = {
+        "source": source,
+        "stock_filename": stock_file.name if stock_file else None,
+        "ventas_filename": ventas_file.name if ventas_file else None,
+        "recepciones_filename": recepciones_file.name if recepciones_file else None,
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+    db.collection("inventory_uploads").add(upload_doc)
+
+
 @st.cache_data
 def load_sample_data():
     """Generate sample data for demonstration."""
@@ -892,7 +922,13 @@ def main():
             max_value=6.0,
             value=2.0,
             step=0.1,
-            help="Horizonte de cobertura en meses (plazo de entrega + periodo de revisión). Filtra por marca para ajustarlo al proveedor"
+            help="Number of months to calculate purchase needs"
+        )
+        
+        contemplar_sobre_stock = st.checkbox(
+            "Consider Over-Stock",
+            value=False,
+            help="Include items that are over-stocked in recommendations"
         )
 
         st.divider()
@@ -1112,6 +1148,7 @@ def main():
         with st.spinner("Calculating..."):
             try:
                 compras_df = manager.calculate_compras(
+                    contemplar_sobre_stock,
                     column_overrides=st.session_state.get("column_overrides"),
                 )
             except MultiColumnMappingError as multi_err:
@@ -1155,8 +1192,12 @@ def main():
                 selected_articles = set(ventas_filtered['Artículo'].dropna().unique())
                 stock_filtered = stock_filtered[stock_filtered['Artículo'].isin(selected_articles)]
 
-        from clientes import build_clientes_table
-        clientes_df = build_clientes_table(ventas_filtered, manager.today)
+        clientes_df = calculate_clientes_from_ventas(ventas_filtered, manager.current_year)
+        clientes_monthly_df = calculate_clientes_monthly_from_ventas(
+            ventas_filtered,
+            manager.current_year,
+            manager.current_month,
+        )
 
         month_m2 = manager.current_month - 2 if manager.current_month > 2 else manager.current_month - 2 + 12
         year_m2 = manager.current_year if manager.current_month > 2 else manager.current_year - 1
@@ -1281,10 +1322,11 @@ def main():
         }
 
         # Tabs for different sections
-        tab1, tab2, tab3, tab5 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "📊 Dashboard",
             "🛒 Purchase Orders",
-            "👥 Seguimiento clientes",
+            "👥 Customers",
+            "👥 Customers Monthly",
             "📁 Export"
         ])
         
@@ -1513,14 +1555,14 @@ def main():
                 st.metric("Total Margin", format_eur(filtered_df['MARGEN PEDIDO'].sum()))
         
         with tab3:
-            st.header("👥 Seguimiento clientes")
+            st.header("👥 Customer Analysis")
             
             # Keep numeric dtypes for correct sorting and apply visual formatting in Streamlit
             clientes_column_config = {}
             for col in clientes_df.columns:
-                if 'Año' in col or col in {'YTD', 'YTD_PY', 'L3M', 'L3M_PY', 'Mes en curso (parcial)'}:
+                if 'Año' in col:
                     clientes_column_config[col] = st.column_config.NumberColumn(col, format="€ %.2f")
-                if 'Dif' in col or '%' in col:
+                if 'Dif' in col:
                     clientes_column_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
             st.dataframe(
                 clientes_df,
@@ -1530,19 +1572,51 @@ def main():
             )
             
             # Top customers chart
-            st.subheader("Top 10 Customers by YTD")
-            if 'YTD' in clientes_df.columns:
-                top_customers = clientes_df.nlargest(10, 'YTD')
+            st.subheader("Top 10 Customers by Current Year Sales")
+            current_year_col = f'Año {manager.current_year}'
+            if current_year_col in clientes_df.columns:
+                top_customers = clientes_df.nlargest(10, current_year_col)
                 fig = px.bar(
                     top_customers,
                     x='Cliente',
-                    y='YTD',
-                    color='YTD',
+                    y=current_year_col,
+                    color=current_year_col,
                     color_continuous_scale='Greens'
                 )
                 fig.update_layout(showlegend=False, height=400)
                 st.plotly_chart(fig, use_container_width=True)
         
+        with tab4:
+            st.header("👥 Customer Monthly Analysis")
+
+            clientes_monthly_column_config = {}
+            for col in clientes_monthly_df.columns:
+                if col.startswith('Mes '):
+                    clientes_monthly_column_config[col] = st.column_config.NumberColumn(col, format="€ %.2f")
+                if 'Dif' in col:
+                    clientes_monthly_column_config[col] = st.column_config.NumberColumn(col, format="%.1f%%")
+            st.dataframe(
+                clientes_monthly_df,
+                use_container_width=True,
+                height=600,
+                column_config=clientes_monthly_column_config,
+            )
+
+            st.subheader("Top 10 Customers by Last Month Sales")
+            latest_month_cols = [col for col in clientes_monthly_df.columns if col.startswith('Mes ')]
+            if latest_month_cols:
+                top_col = latest_month_cols[-1]
+                top_customers = clientes_monthly_df.nlargest(10, top_col)
+                fig = px.bar(
+                    top_customers,
+                    x='Cliente',
+                    y=top_col,
+                    color=top_col,
+                    color_continuous_scale='Teal'
+                )
+                fig.update_layout(showlegend=False, height=400)
+                st.plotly_chart(fig, use_container_width=True)
+
         with tab5:
             st.header("📁 Export Results")
             
@@ -1553,6 +1627,7 @@ def main():
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 compras_filtered.to_excel(writer, sheet_name='COMPRAS', index=False)
                 clientes_df.to_excel(writer, sheet_name='CLIENTES', index=False)
+                clientes_monthly_df.to_excel(writer, sheet_name='CLIENTES_MENSUAL', index=False)
             
             output.seek(0)
             
@@ -1567,7 +1642,7 @@ def main():
             st.divider()
             
             # Individual exports
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 compras_excel = dataframe_to_excel_bytes(compras_filtered, 'COMPRAS')
@@ -1587,6 +1662,14 @@ def main():
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
+            with col3:
+                clientes_monthly_excel = dataframe_to_excel_bytes(clientes_monthly_df, 'CLIENTES_MENSUAL')
+                st.download_button(
+                    "📄 Download Customers Monthly (Excel)",
+                    clientes_monthly_excel,
+                    f"clientes_mensual_{pd.Timestamp.now().strftime('%Y%m%d')}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 
 if __name__ == "__main__":
