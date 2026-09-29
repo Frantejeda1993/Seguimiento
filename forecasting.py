@@ -27,6 +27,14 @@ def _restart_index(s, gap):
         if s[i] > 0 and not s[i-gap:i].any(): return i
     return 0
 
+PATRON_LABELS = {
+    'MADURO': 'Histórico continuo',
+    'REACTIVADO': 'Reactivado tras inactividad',
+    'NUEVO': 'Nuevo (<6 meses)',
+    'ESPORADICO': 'Esporádico',
+    'SIN_ROTACION': 'Sin rotación',
+}
+
 def forecast_sku(monthly, cfg=ForecastConfig()):
     """Predice unidades en H con WMA, tendencia amortiguada y stock de seguridad.
 
@@ -34,14 +42,14 @@ def forecast_sku(monthly, cfg=ForecastConfig()):
     seguridad es ``z * sqrt(demanda_H)`` para una cobertura aproximada del 80%.
     """
     s=np.asarray(monthly,float)[-cfg.window:]; H=cfg.horizon_months
-    out=dict(patron='SIN_ROTACION',n_meses=len(s),meses_con_venta=int((s>0).sum()),nivel=0.,tendencia_abs=0.,tendencia_pct=0.,demanda_H=0.,ss=0.)
+    out=dict(patron=PATRON_LABELS['SIN_ROTACION'],n_meses=len(s),meses_con_venta=int((s>0).sum()),nivel=0.,tendencia_abs=0.,tendencia_pct=0.,demanda_H=0.,ss=0.)
     if len(s)==0 or s.sum()<=0:return out
     r=_restart_index(s,cfg.gap_reset_months); reactivado=r>0; s=s[r:]; n=len(s); ms=int((s>0).sum()); out.update(n_meses=n,meses_con_venta=ms)
     young=n<cfg.young_months
-    if reactivado and (n<3 or ms<3): out['patron']='ESPORADICO'; return out
+    if reactivado and (n<3 or ms<3): out['patron']=PATRON_LABELS['ESPORADICO']; return out
     if young and n<=2:
-        lvl=s.mean(); out.update(patron='NUEVO',nivel=lvl,demanda_H=lvl*min(H,1.),ss=0.); return out
-    if ms<cfg.min_sales_months: out['patron']='ESPORADICO'; return out
+        lvl=s.mean(); out.update(patron=PATRON_LABELS['NUEVO'],nivel=lvl,demanda_H=lvl*min(H,1.),ss=round(cfg.z*np.sqrt(max(0.,lvl*min(H,1.))), 1)); return out
+    if ms<cfg.min_sales_months: out['patron']=PATRON_LABELS['ESPORADICO']; return out
     if n>=cfg.young_months:
         med=np.median(s); mad=1.4826*np.median(np.abs(s-med)); cap=med+cfg.winsor_k*max(mad,np.sqrt(med))
         if (s[-3:]>cap).sum()<2:s=np.minimum(s,cap)
@@ -50,15 +58,20 @@ def forecast_sku(monthly, cfg=ForecastConfig()):
         x=np.arange(k); sl,ic=np.polyfit(x,l,1); r2=1-((l-(sl*x+ic))**2).sum()/((l-l.mean())**2).sum()
         if r2>=cfg.trend_r2_min:b=sl*(cfg.phi_down if sl<0 else cfg.phi_up)
     dem=_horizon_sum(lambda j:max(0.,wma+b*(lag+j)),H)
-    out.update(patron='REACTIVADO' if reactivado else ('NUEVO' if young else 'MADURO'),nivel=wma,tendencia_abs=b,tendencia_pct=b/wma if wma>0 else 0.,demanda_H=dem,ss=cfg.z*np.sqrt(dem))
+    patron_key = 'REACTIVADO' if reactivado else ('NUEVO' if young else 'MADURO')
+    out.update(patron=PATRON_LABELS[patron_key],nivel=wma,tendencia_abs=b,tendencia_pct=b/wma if wma>0 else 0.,demanda_H=dem,ss=round(cfg.z*np.sqrt(max(0.,dem)), 1))
     return out
 
 def calcular_pedido(fc, stock, recibir, cartera, reservas, comprable):
-    """Pedido = max(necesidad - stock - recibir, 0), redondeado; necesidad es
-    max(demanda prevista, comprometido) + stock de seguridad."""
-    comprometido=cartera+reservas; disponible=stock+recibir-comprometido; faltante=max(0,-disponible)
-    necesidad=max(fc['demanda_H'],comprometido)+fc['ss']; raw=necesidad-(stock+recibir)
-    return (0 if not comprable else int(max(0,np.floor(raw+.5)))), disponible, faltante, necesidad
+    """Pedido = max(demanda_H - disponible_teorico, 0), redondeado.
+    El stock de seguridad se mantiene a modo informativo pero no fuerza compras adicionales."""
+    comprometido = cartera + reservas
+    disponible = stock + recibir - comprometido
+    faltante = max(0, -disponible)
+    raw = max(0.0, fc['demanda_H'] - disponible)
+    necesidad = fc['demanda_H'] + comprometido
+    pedido = 0 if not comprable else int(max(0, np.floor(raw + .5)))
+    return pedido, disponible, faltante, necesidad
 
 def closed_end(ventas, today):
     """Devuelve el último mes cerrado presente en ventas, nunca el mes en curso."""
@@ -78,13 +91,60 @@ def build_monthly_matrix(ventas, recepciones, closed_end):
     if matrix.empty: return matrix
     return matrix.reindex(columns=pd.period_range(matrix.columns.min(), closed_end, freq='M'), fill_value=0)
 
+def is_descatalogado_o_obsoleto(estado) -> bool:
+    """Comprueba si el estado corresponde a descatalogado u obsoleto."""
+    s = str(estado).strip().upper()
+    if s in ('', 'NAN', 'NONE'):
+        return False
+    return s.startswith(('D', 'O')) or 'DESCATALOG' in s or 'OBSOLET' in s
+
 def tendencia_label(value): return 'Creciente' if value>.02 else ('Decreciente' if value<-.02 else 'Estable')
+
 def build_motivo(row):
-    estado=str(row.get('Estado','')).strip(); f=row.get('Faltante',0); suffix=f' Faltante vendido sin cubrir: {f:.0f} uds.' if f>0 else ''
-    if estado in ('D','O'): return f'Situación {estado}: no se compra.'+suffix
-    p=row.get('Patrón demanda','');
-    if p=='SIN_ROTACION': return 'Sin ventas en los últimos 12 meses: no se compra.'+suffix
-    if p=='ESPORADICO': return 'Ventas esporádicas (<3 meses con venta en 12): sin compra automática.'+suffix
-    if p=='NUEVO': return f"Producto nuevo ({row.get('Meses activos', row.get('n_meses',0))} meses de datos): previsión basada en ventas recientes, revisar."+suffix
-    if row.get('PEDIDO',0)>0:return f"Comprar {row['PEDIDO']:.0f}: demanda prevista {row.get('Demanda prevista H',0):.0f} uds en {row.get('Meses de compra',0):g} meses ({row.get('Tendencia','Estable')}), comprometido {row.get('Comprometido',0):.0f}, stock de seguridad {row.get('Stock Seguridad',0):.0f}, disponible {row.get('Stock',0)+row.get('Pendiente Recibir',0):.0f} (stock {row.get('Stock',0):.0f} + recibir {row.get('Pendiente Recibir',0):.0f})."+suffix
-    return f"No comprar: disponible {row.get('Stock',0)+row.get('Pendiente Recibir',0):.0f} cubre la necesidad de {row.get('Necesidad',0):.0f} uds."+suffix
+    estado = str(row.get('Estado', '')).strip()
+    disp = row.get('Disponible Teorico', 0)
+    stock = row.get('Stock', 0)
+    f = max(0, -disp)
+    
+    # 1. Artículos descatalogados u obsoletos
+    if is_descatalogado_o_obsoleto(estado):
+        if f > 0:
+            return f"Situación {estado}: no se compra. Faltante vendido sin cubrir: {f:.0f} uds (Alerta FALTANTE_DO: requiere gestionar con proveedor o cancelar con cliente)."
+        if stock > 0 or disp > 0:
+            disp_liq = max(stock, disp)
+            return f"Situación {estado}: no se compra. Stock disponible para liquidar: {disp_liq:.0f} uds (Alerta LIQUIDACION)."
+        return f"Situación {estado}: no se compra."
+
+    # 2. Artículos sin rotación
+    p = str(row.get('Patrón demanda', ''))
+    suffix_f = f" Faltante vendido sin cubrir: {f:.0f} uds." if f > 0 else ""
+    if p in ('Sin rotación', 'SIN_ROTACION'):
+        return f"Sin ventas en los últimos 12 meses: no se compra.{suffix_f}"
+
+    # 3. Explicación de revisión para la alerta REVISAR
+    revisar_motivo = ""
+    if p in ('Nuevo (<6 meses)', 'NUEVO'):
+        meses_act = row.get('Meses activos', row.get('n_meses', 0))
+        revisar_motivo = f" [REVISAR: Producto nuevo con solo {meses_act} meses de datos; verificar si la demanda inicial se mantendrá antes de pedir]."
+    elif p in ('Reactivado tras inactividad', 'REACTIVADO'):
+        revisar_motivo = " [REVISAR: Reactivado tras +6 meses sin compras; validar si la venta reciente fue puntual o recurrente antes de cursar pedido]."
+    elif p in ('Esporádico', 'ESPORADICO'):
+        revisar_motivo = " [REVISAR: Demanda esporádica (<3 meses con venta en el último año); confirmar necesidad con cliente antes de comprar]."
+
+    pedido = row.get('PEDIDO', 0)
+    demanda_col = row.get('Demanda prevista meses de compra', row.get('Demanda prevista H', 0))
+    pend_servir = row.get('Pendiente Servir', row.get('Comprometido', 0))
+
+    if pedido > 0:
+        base_msg = (
+            f"Comprar {pedido:.0f}: demanda prevista {demanda_col:.0f} uds en {row.get('Meses de compra',0):g} meses ({row.get('Tendencia','Estable')}), "
+            f"pendiente servir {pend_servir:.0f}, disponible teórico {disp:.0f} (stock {stock:.0f} + recibir {row.get('Pendiente Recibir',0):.0f} - servir {pend_servir:.0f}), "
+            f"stock seguridad informativo {row.get('Stock Seguridad',0):.0f}."
+        )
+        return base_msg + suffix_f + revisar_motivo
+
+    # Pedido 0
+    if p in ('Esporádico', 'ESPORADICO'):
+        return f"Ventas esporádicas (<3 meses con venta en 12): sin compra automática.{suffix_f}{revisar_motivo if f > 0 else ''}"
+
+    return f"No comprar: disponible teórico {disp:.0f} cubre la demanda prevista de {demanda_col:.0f} uds.{suffix_f}{revisar_motivo if f > 0 else ''}"

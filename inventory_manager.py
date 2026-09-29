@@ -62,9 +62,9 @@ def get_export_compras_columns(current_year: int) -> list[str]:
     """Columnas esenciales para el export del pedido."""
     return ['SKU', 'Marca', 'Descripción', 'Estado', 'Demanda 12M',
             f'Ventas {current_year - 2}', f'Ventas {current_year - 1}', f'Ventas {current_year}',
-            'Demanda mensual prevista', 'Tendencia', 'Patrón demanda', 'Stock',
-            'Pendiente Recibir', 'Comprometido', 'Disponible Teorico', 'Meses de Stock',
-            'PEDIDO', 'PEDIDO ACTUAL', 'Dif PEDIDO', 'Precio Compra', 'VALOR PEDIDO',
+            'Demanda prevista meses de compra', 'Demanda mensual prevista', 'Tendencia', 'Patrón demanda', 'Stock',
+            'Pendiente Recibir', 'Pendiente Servir', 'Disponible Teorico', 'Meses de Stock',
+            'PEDIDO', 'Precio Compra', 'VALOR PEDIDO',
             'MARGEN PEDIDO', 'Motivo', 'Alerta', 'Stock Seguridad']
 
 
@@ -281,7 +281,8 @@ class InventoryManager:
     ) -> pd.DataFrame:
         """Calcula pedidos propuestos y conserva el algoritmo anterior para comparar."""
         from forecasting import (ForecastConfig, build_monthly_matrix, build_motivo,
-                                 calcular_pedido, closed_end, forecast_sku, tendencia_label)
+                                 calcular_pedido, closed_end, forecast_sku, tendencia_label,
+                                 is_descatalogado_o_obsoleto)
         if metodo_pedido not in {"propuesto", "actual"}:
             raise ValueError("metodo_pedido debe ser 'propuesto' o 'actual'")
         if self.ventas_df is None or self.stock_df is None:
@@ -303,36 +304,46 @@ class InventoryManager:
             return numerator / denominator
         compras['Precio Compra']=compras.SKU.map(weighted(base,'Precio Coste','Unidades Venta')).fillna(compras.SKU.map(ventas.groupby('Artículo')['Precio Coste'].mean())).fillna(0)
         compras['Margen']=compras.SKU.map(weighted(base,'Margen','Importe Neto')).fillna(compras.SKU.map(ventas.groupby('Artículo')['Margen'].mean())).fillna(0)
-        margen_es_porcentaje = compras.Margen.dropna().median() > 1.5
         revenue=base.groupby('Artículo')['Importe Neto'].sum(); units=base.groupby('Artículo')['Unidades Venta'].sum().replace(0,np.nan); compras['Precio Venta medio']=compras.SKU.map(revenue/units).fillna(0)
         indexed=stock.drop_duplicates('Artículo').set_index('Artículo'); compras['Estado']=compras.SKU.map(indexed['Situación']).fillna('')
         compras['Stock']=compras.SKU.map(indexed['Stock']).fillna(0); compras['Stock Unidades']=compras['Stock']
         compras=self._attach_stock_units_and_value(compras,stock)
-        compras['Cartera']=compras.SKU.map(indexed['Cartera']).fillna(0); compras['Reservas']=compras.SKU.map(indexed['Reservas']).fillna(0); compras['Comprometido']=compras.Cartera+compras.Reservas; compras['Pendiente Servir']=compras.Comprometido
-        compras['Pendiente Recibir']=self._calc_pending_receive(compras.SKU,stock); compras['Disponible Teorico']=compras.Stock+compras['Pendiente Recibir']-compras.Comprometido
-        # Legacy output remains available, but it no longer supplies Meses de Stock.
-        legacy=self._calculate_sales_metrics(compras.copy(),ventas); avg=f'Promedio {self.current_year-2} - {self.current_year}'; cur=f'Ventas {self.current_year}'; legacy['COMPRAR']=legacy.Estado.astype(str).str.strip().eq(''); compras['PEDIDO ACTUAL']=self._calculate_pedido_legacy(legacy,avg,cur)
-        # Preserve the legacy monthly/annual sales fields in the purchase export.
+        compras['Cartera']=compras.SKU.map(indexed['Cartera']).fillna(0); compras['Reservas']=compras.SKU.map(indexed['Reservas']).fillna(0); compras['Pendiente Servir']=compras.Cartera+compras.Reservas
+        compras['Pendiente Recibir']=self._calc_pending_receive(compras.SKU,stock); compras['Disponible Teorico']=compras.Stock+compras['Pendiente Recibir']-compras['Pendiente Servir']
+        legacy=self._calculate_sales_metrics(compras.copy(),ventas)
         sales_columns = [c for c in legacy.columns if c.startswith('Ventas ') or c.startswith('Promedio ')]
         compras[sales_columns] = legacy[sales_columns]
         matrix=build_monthly_matrix(ventas,self.recepciones_df,cutoff); cfg=ForecastConfig(horizon_months=self.meses_compras)
         matrix_values = {sku: values for sku, values in zip(matrix.index, matrix.to_numpy())}
         records = [forecast_sku(matrix_values.get(sku, np.array([])), cfg) for sku in compras.SKU]
-        fcdf=pd.DataFrame(records); compras['Meses activos']=fcdf.n_meses; compras['Meses con venta 12M']=fcdf.meses_con_venta; compras['Demanda prevista H']=fcdf.demanda_H; compras['Demanda mensual prevista']=fcdf.demanda_H/self.meses_compras; compras['Tendencia %/mes']=fcdf.tendencia_pct; compras['Tendencia']=fcdf.tendencia_pct.map(tendencia_label); compras['Patrón demanda']=fcdf.patron; compras['Stock Seguridad']=fcdf.ss
+        fcdf=pd.DataFrame(records); compras['Meses activos']=fcdf.n_meses; compras['Meses con venta 12M']=fcdf.meses_con_venta; compras['Demanda prevista meses de compra']=fcdf.demanda_H; compras['Demanda mensual prevista']=fcdf.demanda_H/self.meses_compras; compras['Tendencia %/mes']=fcdf.tendencia_pct; compras['Tendencia']=fcdf.tendencia_pct.map(tendencia_label); compras['Patrón demanda']=fcdf.patron; compras['Stock Seguridad']=fcdf.ss
         compras['Demanda 12M']=compras.SKU.map(recent.groupby('Artículo')['Unidades Venta'].sum()).fillna(0)
-        vals = [calcular_pedido(fc, stock, recibir, cartera, reservas, str(estado).strip() == '') for fc, stock, recibir, cartera, reservas, estado in zip(records, compras['Stock'].to_numpy(), compras['Pendiente Recibir'].to_numpy(), compras['Cartera'].to_numpy(), compras['Reservas'].to_numpy(), compras['Estado'].to_numpy())]
-        compras['PEDIDO']=[v[0] for v in vals]; compras['Faltante']=[v[2] for v in vals]; compras['Necesidad']=[v[3] for v in vals]
+        comprable_mask = ~compras['Estado'].map(is_descatalogado_o_obsoleto)
+        vals = [calcular_pedido(fc, stock, recibir, cartera, reservas, comprable) for fc, stock, recibir, cartera, reservas, comprable in zip(records, compras['Stock'].to_numpy(), compras['Pendiente Recibir'].to_numpy(), compras['Cartera'].to_numpy(), compras['Reservas'].to_numpy(), comprable_mask.to_numpy())]
+        compras['PEDIDO']=[v[0] for v in vals]; compras['Necesidad']=[v[3] for v in vals]
         compras['Meses de Stock']=np.where(compras['Demanda mensual prevista']>0,np.maximum(compras['Disponible Teorico'],0)/compras['Demanda mensual prevista'],np.nan)
-        compras['Dif PEDIDO']=compras.PEDIDO-compras['PEDIDO ACTUAL']; do=compras.Estado.astype(str).str.strip().isin(['D','O']); compras['Alerta']=np.select([do&(compras.Faltante>0),do&(compras.Stock>0)&compras['Patrón demanda'].isin(['SIN_ROTACION','ESPORADICO']),compras['Patrón demanda'].isin(['NUEVO','REACTIVADO','ESPORADICO'])&((compras.PEDIDO>0)|(compras.Faltante>0))],['FALTANTE_DO','LIQUIDACION','REVISAR'],'')
-        compras['Meses de compra']=self.meses_compras; compras['Motivo']=compras.apply(build_motivo,axis=1); active='PEDIDO' if metodo_pedido=='propuesto' else 'PEDIDO ACTUAL'; compras['VALOR PEDIDO']=compras[active]*compras['Precio Compra']
-        margen_pct = compras['Margen'].copy()
-        if not margen_es_porcentaje:
-            margen_pct *= 100.0
-        factor_margen = 1.0 - ((100.0 - margen_pct) / 100.0)
+        do = compras['Estado'].map(is_descatalogado_o_obsoleto)
+        faltante = np.maximum(0, -compras['Disponible Teorico'])
+        has_stock = (compras['Stock'] > 0) | (compras['Disponible Teorico'] > 0)
+        patron = compras['Patrón demanda'].astype(str)
+        is_revisar = patron.isin(['Nuevo (<6 meses)', 'Reactivado tras inactividad', 'Esporádico', 'NUEVO', 'REACTIVADO', 'ESPORADICO'])
+        compras['Alerta']=np.select(
+            [
+                do & (faltante > 0),
+                do & has_stock,
+                (~do) & is_revisar & ((compras.PEDIDO > 0) | (faltante > 0))
+            ],
+            ['FALTANTE_DO', 'LIQUIDACION', 'REVISAR'],
+            default=''
+        )
+        compras['Meses de compra']=self.meses_compras; compras['Motivo']=compras.apply(build_motivo,axis=1); compras['VALOR PEDIDO']=compras['PEDIDO']*compras['Precio Compra']
+        margen_raw = pd.to_numeric(compras['Margen'], errors='coerce').fillna(0)
+        es_escala_100 = margen_raw.abs().max() > 1.0
+        factor_margen = (margen_raw / 100.0) if es_escala_100 else margen_raw
         precio_venta = compras['Precio Venta medio'].copy()
-        sin_venta = (precio_venta <= 0) & (compras['Precio Compra'] > 0) & factor_margen.between(0, 1, inclusive='neither')
+        sin_venta = (precio_venta <= 0) & (compras['Precio Compra'] > 0) & (factor_margen > 0) & (factor_margen < 1)
         precio_venta.loc[sin_venta] = compras.loc[sin_venta, 'Precio Compra'] / (1.0 - factor_margen.loc[sin_venta])
-        compras['MARGEN PEDIDO'] = compras[active] * precio_venta * factor_margen
+        compras['MARGEN PEDIDO'] = compras['PEDIDO'] * precio_venta * factor_margen
         self.compras_df=compras; return compras
 
     def _calculate_pedido_legacy(self, compras, avg_3y_col, current_year_col):

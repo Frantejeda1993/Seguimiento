@@ -204,7 +204,12 @@ def require_auth() -> bool:
     st.title("🔒 Inventory Management System")
     st.markdown("Please enter the app password to continue.")
 
-    if "APP_PASSWORD" not in st.secrets:
+    try:
+        app_password = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        app_password = None
+
+    if not app_password:
         st.error(
             "Missing APP_PASSWORD secret. Set it in Streamlit Cloud "
             "Secrets or in a local `.streamlit/secrets.toml` file."
@@ -216,7 +221,7 @@ def require_auth() -> bool:
         sign_in = st.form_submit_button("Sign in", type="primary")
 
     if sign_in:
-        if hmac.compare_digest(password, str(st.secrets["APP_PASSWORD"])):
+        if hmac.compare_digest(password, str(app_password)):
             st.session_state.authenticated = True
             st.rerun()
         else:
@@ -1033,8 +1038,9 @@ def main():
 
         if selected_brand:
             compras_filtered = compras_filtered[compras_filtered['Marca'].isin(selected_brand)]
-            if not ventas_filtered.empty and 'Clave 1' in ventas_filtered.columns:
-                ventas_filtered = ventas_filtered[ventas_filtered['Clave 1'].isin(selected_brand)]
+            brand_col_v = next((c for c in ['Clave 1', 'Marca'] if c in ventas_filtered.columns), None)
+            if not ventas_filtered.empty and brand_col_v:
+                ventas_filtered = ventas_filtered[ventas_filtered[brand_col_v].isin(selected_brand)]
             if not stock_filtered.empty and not ventas_filtered.empty and 'Artículo' in ventas_filtered.columns:
                 selected_articles = set(ventas_filtered['Artículo'].dropna().unique())
                 stock_filtered = stock_filtered[stock_filtered['Artículo'].isin(selected_articles)]
@@ -1379,15 +1385,18 @@ def main():
             
             # Display table
             purchase_columns = [
-                'SKU', 'Marca', 'Descripción', 'Stock Unidades',
-                'Meses de Stock', 'PEDIDO', 'VALOR PEDIDO', 'MARGEN PEDIDO'
+                'SKU', 'Marca', 'Descripción', 'Stock Unidades', 'Pendiente Servir',
+                'Demanda prevista meses de compra', 'Meses de Stock', 'PEDIDO', 'VALOR PEDIDO', 'MARGEN PEDIDO'
             ]
-            purchase_display_df = filtered_df[purchase_columns].copy()
-            purchase_display_df['Stock Unidades'] = purchase_display_df['Stock Unidades'].map(lambda v: f"{v:.0f}")
-            purchase_display_df['Meses de Stock'] = purchase_display_df['Meses de Stock'].map(lambda v: f"{v:.1f}")
-            purchase_display_df['PEDIDO'] = purchase_display_df['PEDIDO'].map(lambda v: f"{v:.0f}")
-            purchase_display_df['VALOR PEDIDO'] = purchase_display_df['VALOR PEDIDO'].map(format_eur)
-            purchase_display_df['MARGEN PEDIDO'] = purchase_display_df['MARGEN PEDIDO'].map(format_eur)
+            cols_to_use = [c for c in purchase_columns if c in filtered_df.columns]
+            purchase_display_df = filtered_df[cols_to_use].copy()
+            if 'Stock Unidades' in purchase_display_df: purchase_display_df['Stock Unidades'] = purchase_display_df['Stock Unidades'].map(lambda v: f"{v:.0f}")
+            if 'Pendiente Servir' in purchase_display_df: purchase_display_df['Pendiente Servir'] = purchase_display_df['Pendiente Servir'].map(lambda v: f"{v:.0f}")
+            if 'Demanda prevista meses de compra' in purchase_display_df: purchase_display_df['Demanda prevista meses de compra'] = purchase_display_df['Demanda prevista meses de compra'].map(lambda v: f"{v:.0f}")
+            if 'Meses de Stock' in purchase_display_df: purchase_display_df['Meses de Stock'] = purchase_display_df['Meses de Stock'].map(lambda v: f"{v:.1f}")
+            if 'PEDIDO' in purchase_display_df: purchase_display_df['PEDIDO'] = purchase_display_df['PEDIDO'].map(lambda v: f"{v:.0f}")
+            if 'VALOR PEDIDO' in purchase_display_df: purchase_display_df['VALOR PEDIDO'] = purchase_display_df['VALOR PEDIDO'].map(format_eur)
+            if 'MARGEN PEDIDO' in purchase_display_df: purchase_display_df['MARGEN PEDIDO'] = purchase_display_df['MARGEN PEDIDO'].map(format_eur)
             st.dataframe(purchase_display_df, use_container_width=True, height=600)
             
             # Summary
@@ -1416,15 +1425,80 @@ def main():
             if selected_abc and 'ABC' in clientes_display: clientes_display = clientes_display[clientes_display.ABC.isin(selected_abc)]
             if search_term.strip():
                 clientes_display = clientes_display[clientes_display.Cod.astype(str).str.contains(search_term, case=False, na=False) | clientes_display.Cliente.astype(str).str.contains(search_term, case=False, na=False)]
-            activos = int(clientes_df.L3M.gt(0).sum()); perdidos = int(clientes_df.Tendencia.eq('Sin compra reciente').sum()); ytd_total = clientes_df.YTD.sum(); ytd_py_total = clientes_df.YTD_PY.sum()
-            k1,k2,k3,k4=st.columns(4); k1.metric("Clientes activos (L3M)", activos); k2.metric("Clientes sin compra reciente", perdidos); k3.metric("YTD Total", format_eur(ytd_total)); k4.metric("Variación YTD vs PY", f"{(ytd_total-ytd_py_total)/ytd_py_total:+.1%}" if ytd_py_total else "N/A")
+            activos = int(clientes_df.L3M.gt(0).sum())
+            inactivos = int(clientes_df.Tendencia.isin(['Inactivo', 'Sin compra reciente']).sum())
+            ytd_total = clientes_df.YTD.sum()
+            ytd_py_total = clientes_df.YTD_PY.sum()
+            k1,k2,k3,k4=st.columns(4)
+            k1.metric("Clientes activos (L3M)", activos)
+            k2.metric("Clientes sin compra / inactivos", inactivos)
+            k3.metric("YTD Total", format_eur(ytd_total))
+            k4.metric("Variación YTD vs PY", f"{(ytd_total-ytd_py_total)/ytd_py_total:+.1%}" if ytd_py_total else "N/A")
             if not clientes_df.empty:
                 st.markdown("🏆 Top 5: " + " · ".join(f"**{r.Cliente}** ({format_eur(r.YTD)})" for _,r in clientes_df.nlargest(5,'YTD').iterrows()))
-            priority = ['Ranking YTD','ABC','Cod','Cliente','YTD','YTD_PY','Var_YTD_%','L3M','L3M_PY','Var_L3M_YoY_%','Tendencia','Cambio Ranking','Ticket Medio','Recurrencia %','Cuota_%','Meses_sin_compra','Mes en curso (parcial)']
+            priority = ['Ranking YTD','ABC','Cod','Cliente','YTD','YTD_PY','Var_YTD_%','Var_YTD_abs','L3M','L3M_PY','Var_L3M_YoY_%','Tendencia','Cambio Ranking','Ticket Medio','Recurrencia %','Cuota_%','Meses_sin_compra','Mes en curso (parcial)']
             ordered = [c for c in priority if c in clientes_display] + [c for c in clientes_display if c not in priority]
-            config = {c: st.column_config.NumberColumn(c, format="€ %.2f") for c in clientes_display if c in {'YTD','YTD_PY','L3M','L3M_PY','Mes en curso (parcial)','Ticket Medio'} or c.startswith('Año ') or c in MESES}
-            config.update({c: st.column_config.NumberColumn(c, format="%.1f%%") for c in clientes_display if '%' in c or c in {'Recurrencia %','Cuota_%'}})
+            config = {c: st.column_config.NumberColumn(c, format="€ %.2f") for c in clientes_display if c in {'YTD','YTD_PY','Var_YTD_abs','L3M','L3M_PY','Mes en curso (parcial)','Ticket Medio'} or c.startswith('Año ') or c in MESES}
+            if 'Cuota_%' in clientes_display: config['Cuota_%'] = st.column_config.NumberColumn('Cuota_%', format="%.2f%%")
+            if 'Var_YTD_%' in clientes_display: config['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
+            if 'Var_L3M_YoY_%' in clientes_display: config['Var_L3M_YoY_%'] = st.column_config.NumberColumn('Var_L3M_YoY_%', format="%.1f%%")
+            if 'Recurrencia %' in clientes_display: config['Recurrencia %'] = st.column_config.NumberColumn('Recurrencia %', format="%.1f%%")
+            if 'Meses_sin_compra' in clientes_display: config['Meses_sin_compra'] = st.column_config.NumberColumn('Meses_sin_compra', format="%.0f")
+            if 'Ranking YTD' in clientes_display: config['Ranking YTD'] = st.column_config.NumberColumn('Ranking YTD', format="%.0f")
+            if 'Ranking PY' in clientes_display: config['Ranking PY'] = st.column_config.NumberColumn('Ranking PY', format="%.0f")
+            if 'Cambio Ranking' in clientes_display: config['Cambio Ranking'] = st.column_config.NumberColumn('Cambio Ranking', format="%+d")
             st.dataframe(clientes_display[ordered], use_container_width=True, height=700, column_config=config)
+            
+            # Comparativa directa entre clientes seleccionados
+            with st.expander("⚖️ Comparativa directa entre clientes", expanded=False):
+                st.markdown("Selecciona dos o más clientes para comparar sus ventas, métricas y comportamiento mensual frente a frente.")
+                compare_choices = clientes_df.Cod.tolist()
+                selected_compare = st.multiselect(
+                    "Seleccionar clientes para comparar",
+                    options=compare_choices,
+                    default=compare_choices[:2] if len(compare_choices) >= 2 else compare_choices,
+                    format_func=lambda cod: f"{cod} — {clientes_df.loc[clientes_df.Cod==cod,'Cliente'].iloc[0]}"
+                )
+                if selected_compare:
+                    compare_df = clientes_df[clientes_df.Cod.isin(selected_compare)].copy()
+                    cols_compare = [
+                        'Cod', 'Cliente', 'ABC', 'Tendencia', 'Ranking YTD',
+                        'YTD', 'YTD_PY', 'Var_YTD_%', 'Var_YTD_abs',
+                        'L3M', 'Ticket Medio', 'Recurrencia %', 'Meses_sin_compra'
+                    ]
+                    compare_display = compare_df[[c for c in cols_compare if c in compare_df]].copy()
+                    comp_cfg = {
+                        c: st.column_config.NumberColumn(c, format="€ %.2f")
+                        for c in compare_display if c in {'YTD', 'YTD_PY', 'Var_YTD_abs', 'L3M', 'Ticket Medio'}
+                    }
+                    if 'Var_YTD_%' in compare_display: comp_cfg['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
+                    if 'Recurrencia %' in compare_display: comp_cfg['Recurrencia %'] = st.column_config.NumberColumn('Recurrencia %', format="%.1f%%")
+                    if 'Meses_sin_compra' in compare_display: comp_cfg['Meses_sin_compra'] = st.column_config.NumberColumn('Meses_sin_compra', format="%.0f")
+                    if 'Ranking YTD' in compare_display: comp_cfg['Ranking YTD'] = st.column_config.NumberColumn('Ranking YTD', format="%.0f")
+                    st.dataframe(compare_display, use_container_width=True, hide_index=True, column_config=comp_cfg)
+                    
+                    months_available = [m for m in MESES if m in compare_df.columns]
+                    if months_available:
+                        st.markdown("**Evolución mensual comparativa (Año en curso)**")
+                        monthly_comp = pd.melt(
+                            compare_df[['Cliente'] + months_available],
+                            id_vars=['Cliente'],
+                            value_vars=months_available,
+                            var_name='Mes',
+                            value_name='Importe'
+                        )
+                        fig_comp = px.line(
+                            monthly_comp,
+                            x='Mes',
+                            y='Importe',
+                            color='Cliente',
+                            markers=True
+                        )
+                        fig_comp.update_layout(xaxis_title="Mes", yaxis_title="Importe Neto (€)", hovermode="x unified", height=400)
+                        st.plotly_chart(fig_comp, use_container_width=True)
+                else:
+                    st.info("Selecciona al menos un cliente para comparar.")
+
             c1,c2=st.columns(2)
             with c1:
                 chart = pd.melt(clientes_df.nlargest(15,'YTD')[['Cliente','YTD','YTD_PY']], id_vars='Cliente', var_name='Periodo', value_name='Importe')
