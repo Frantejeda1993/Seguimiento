@@ -1436,7 +1436,7 @@ def main():
             k4.metric("Variación YTD vs PY", f"{(ytd_total-ytd_py_total)/ytd_py_total:+.1%}" if ytd_py_total else "N/A")
             if not clientes_df.empty:
                 st.markdown("🏆 Top 5: " + " · ".join(f"**{r.Cliente}** ({format_eur(r.YTD)})" for _,r in clientes_df.nlargest(5,'YTD').iterrows()))
-            priority = ['Ranking YTD','ABC','Cod','Cliente','YTD','YTD_PY','Var_YTD_%','Var_YTD_abs','L3M','L3M_PY','Var_L3M_YoY_%','Tendencia','Cambio Ranking','Ticket Medio','Recurrencia %','Cuota_%','Meses_sin_compra','Mes en curso (parcial)']
+            priority = ['Cliente','Ranking YTD','ABC','Cod','YTD','YTD_PY','Var_YTD_%','Var_YTD_abs','L3M','L3M_PY','Var_L3M_YoY_%','Tendencia','Cambio Ranking','Ticket Medio','Recurrencia %','Cuota_%','Meses_sin_compra','Mes en curso (parcial)']
             ordered = [c for c in priority if c in clientes_display] + [c for c in clientes_display if c not in priority]
             config = {c: st.column_config.NumberColumn(c, format="€ %.2f") for c in clientes_display if c in {'YTD','YTD_PY','Var_YTD_abs','L3M','L3M_PY','Mes en curso (parcial)','Ticket Medio'} or c.startswith('Año ') or c in MESES}
             if 'Cuota_%' in clientes_display: config['Cuota_%'] = st.column_config.NumberColumn('Cuota_%', format="%.2f%%")
@@ -1447,7 +1447,7 @@ def main():
             if 'Ranking YTD' in clientes_display: config['Ranking YTD'] = st.column_config.NumberColumn('Ranking YTD', format="%.0f")
             if 'Ranking PY' in clientes_display: config['Ranking PY'] = st.column_config.NumberColumn('Ranking PY', format="%.0f")
             if 'Cambio Ranking' in clientes_display: config['Cambio Ranking'] = st.column_config.NumberColumn('Cambio Ranking', format="%+d")
-            st.dataframe(clientes_display[ordered], use_container_width=True, height=700, column_config=config)
+            st.dataframe(clientes_display[ordered], use_container_width=True, height=700, column_config=config, hide_index=True)
             
             # Comparativa directa entre clientes seleccionados
             with st.expander("⚖️ Comparativa directa entre clientes", expanded=False):
@@ -1462,7 +1462,7 @@ def main():
                 if selected_compare:
                     compare_df = clientes_df[clientes_df.Cod.isin(selected_compare)].copy()
                     cols_compare = [
-                        'Cod', 'Cliente', 'ABC', 'Tendencia', 'Ranking YTD',
+                        'Cliente', 'Ranking YTD', 'ABC', 'Cod', 'Tendencia',
                         'YTD', 'YTD_PY', 'Var_YTD_%', 'Var_YTD_abs',
                         'L3M', 'Ticket Medio', 'Recurrencia %', 'Meses_sin_compra'
                     ]
