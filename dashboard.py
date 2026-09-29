@@ -27,8 +27,11 @@ import json
 import gzip
 import base64
 import re
+import calendar
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+MESES_ES = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
 
 
 HISTORY_FILE = Path(".upload_history_local.json")
@@ -1075,6 +1078,68 @@ def main():
             if sales_m1_last_year_total != 0 else None
         )
 
+        # Day extraction for Month-to-Date (Month_YTD) calculations
+        day_series = None
+        day_col = next((c for c in ['Día Factura', 'Dia Factura', 'Día', 'Dia', 'Dia_Factura', 'Day'] if c in ventas_filtered.columns), None)
+        if day_col:
+            day_series = pd.to_numeric(ventas_filtered[day_col], errors='coerce')
+        else:
+            date_col = next((c for c in ['Fecha Factura', 'Fecha_Factura', 'Fecha Facturacion', 'Fecha Facturación', 'Fecha', 'Date', 'Fecha Albarán', 'Fecha Albaran'] if c in ventas_filtered.columns), None)
+            if date_col:
+                day_series = pd.to_datetime(ventas_filtered[date_col], errors='coerce', dayfirst=True).dt.day
+
+        if isinstance(as_of, str):
+            today_date = pd.to_datetime(as_of).date()
+        elif hasattr(as_of, 'date') and callable(as_of.date):
+            today_date = as_of.date()
+        elif isinstance(as_of, date):
+            today_date = as_of
+        else:
+            today_date = date.today()
+
+        today_day = today_date.day
+        cur_year = manager.current_year
+        cur_month = manager.current_month
+        py_year = cur_year - 1
+
+        pm_month = cur_month - 1 if cur_month > 1 else 12
+        pm_year = cur_year if cur_month > 1 else cur_year - 1
+        pm_max_day = calendar.monthrange(pm_year, pm_month)[1]
+        pm_cutoff_day = min(today_day, pm_max_day)
+
+        month_ytd_total = 0.0
+        month_ytd_py_total = 0.0
+        month_ytd_pm_total = 0.0
+        has_day_granularity = day_series is not None and day_series.notna().any()
+
+        if not ventas_filtered.empty and {'Año Factura', 'Mes Factura', 'Importe Neto'}.issubset(ventas_filtered.columns):
+            if has_day_granularity:
+                mask_cur = (ventas_filtered['Año Factura'] == cur_year) & (ventas_filtered['Mes Factura'] == cur_month) & (day_series <= today_day)
+                mask_py = (ventas_filtered['Año Factura'] == py_year) & (ventas_filtered['Mes Factura'] == cur_month) & (day_series <= today_day)
+                mask_pm = (ventas_filtered['Año Factura'] == pm_year) & (ventas_filtered['Mes Factura'] == pm_month) & (day_series <= pm_cutoff_day)
+            else:
+                mask_cur = (ventas_filtered['Año Factura'] == cur_year) & (ventas_filtered['Mes Factura'] == cur_month)
+                mask_py = (ventas_filtered['Año Factura'] == py_year) & (ventas_filtered['Mes Factura'] == cur_month)
+                mask_pm = (ventas_filtered['Año Factura'] == pm_year) & (ventas_filtered['Mes Factura'] == pm_month)
+
+            month_ytd_total = pd.to_numeric(ventas_filtered.loc[mask_cur, 'Importe Neto'], errors='coerce').fillna(0).sum()
+            month_ytd_py_total = pd.to_numeric(ventas_filtered.loc[mask_py, 'Importe Neto'], errors='coerce').fillna(0).sum()
+            month_ytd_pm_total = pd.to_numeric(ventas_filtered.loc[mask_pm, 'Importe Neto'], errors='coerce').fillna(0).sum()
+
+        growth_cur_vs_py = (
+            (month_ytd_total - month_ytd_py_total) / month_ytd_py_total
+            if month_ytd_py_total != 0 else None
+        )
+        growth_cur_vs_pm = (
+            (month_ytd_total - month_ytd_pm_total) / month_ytd_pm_total
+            if month_ytd_pm_total != 0 else None
+        )
+
+        label_m1_vs_m2 = f"{MESES_ES[month_m1]} {str(year_m1)[-2:]} vs {MESES_ES[month_m2]} {str(year_m2)[-2:]}"
+        label_m1_vs_py = f"{MESES_ES[month_m1]} {str(year_m1)[-2:]} vs {MESES_ES[month_m1]} {str(year_m1 - 1)[-2:]}"
+        label_cur_vs_py = f"{MESES_ES[cur_month]} {str(cur_year)[-2:]} vs {MESES_ES[cur_month]} {str(py_year)[-2:]}"
+        label_cur_vs_pm = f"{MESES_ES[cur_month]} {str(cur_year)[-2:]} vs {MESES_ES[pm_month]} {str(pm_year)[-2:]}"
+
         unit_cost_map = pd.Series(dtype=float)
         if not ventas_filtered.empty and {'Artículo', 'Precio Coste'}.issubset(ventas_filtered.columns):
             unit_cost_map = (
@@ -1253,26 +1318,48 @@ def main():
             col5, col6, col7 = st.columns(3)
             with col5:
                 st.metric(
-                    f"Ventas {year_m2}-{month_m2:02d}",
+                    f"Ventas {MESES_ES[month_m2]} {str(year_m2)[-2:]}",
                     format_eur(sales_m2_total),
-                    help="Net sales from 2 months ago"
+                    help=f"Ventas netas cerradas de {MESES_ES[month_m2]} {year_m2}"
                 )
             with col6:
                 st.metric(
-                    f"Ventas {year_m1 - 1}-{month_m1:02d}",
+                    f"Ventas {MESES_ES[month_m1]} {str(year_m1 - 1)[-2:]}",
                     format_eur(sales_m1_last_year_total),
-                    help="Net sales from the same month last year"
+                    help=f"Ventas netas cerradas de {MESES_ES[month_m1]} {year_m1 - 1}"
                 )
             with col7:
                 st.metric(
-                    f"Ventas {year_m1}-{month_m1:02d}",
+                    f"Ventas {MESES_ES[month_m1]} {str(year_m1)[-2:]}",
                     format_eur(sales_m1_total),
-                    help="Net sales from 1 month ago compared to month -2 and same month last year"
+                    help=f"Ventas netas cerradas de {MESES_ES[month_m1]} {year_m1}"
                 )
                 st.markdown(
-                    _format_growth_badge("vs m-2", monthly_growth) + _format_growth_badge("vs a-1", yearly_growth),
+                    _format_growth_badge(label_m1_vs_m2, monthly_growth)
+                    + _format_growth_badge(label_m1_vs_py, yearly_growth),
                     unsafe_allow_html=True,
                 )
+
+            col_mytd, col_mytd_py = st.columns(2)
+            with col_mytd:
+                st.metric(
+                    f"Month_YTD ({MESES_ES[cur_month]} {str(cur_year)[-2:]})",
+                    format_eur(month_ytd_total),
+                    help=f"Ventas acumuladas al día de hoy ({today_day} de {MESES_ES[cur_month]} {cur_year})"
+                )
+                st.caption(f"Acumulado al día {today_day} de {MESES_ES[cur_month]} {cur_year}" if has_day_granularity else f"Ventas mes {MESES_ES[cur_month]} {cur_year}")
+                st.markdown(
+                    _format_growth_badge(label_cur_vs_py, growth_cur_vs_py)
+                    + _format_growth_badge(label_cur_vs_pm, growth_cur_vs_pm),
+                    unsafe_allow_html=True,
+                )
+            with col_mytd_py:
+                st.metric(
+                    f"Month_YTD_PY ({MESES_ES[cur_month]} {str(py_year)[-2:]})",
+                    format_eur(month_ytd_py_total),
+                    help=f"Ventas acumuladas hasta el mismo día ({today_day} de {MESES_ES[cur_month]} {py_year})"
+                )
+                st.caption(f"Acumulado al día {today_day} de {MESES_ES[cur_month]} {py_year}" if has_day_granularity else f"Ventas mes {MESES_ES[cur_month]} {py_year}")
             
             st.divider()
             
