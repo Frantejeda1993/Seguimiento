@@ -1045,12 +1045,13 @@ def main():
                 selected_articles = set(ventas_filtered['Artículo'].dropna().unique())
                 stock_filtered = stock_filtered[stock_filtered['Artículo'].isin(selected_articles)]
 
-        from clientes import build_clientes_table
+        from clientes import build_clientes_table, build_zonas_table
         # Managers retained in Streamlit session state can predate the `today`
         # attribute introduced in the forecasting release.  Keep those sessions
         # usable instead of failing while rendering the customer tab.
         as_of = getattr(manager, "today", date.today())
         clientes_df = build_clientes_table(ventas_filtered, as_of)
+        zonas_df = build_zonas_table(ventas_filtered, as_of)
 
         month_m2 = manager.current_month - 2 if manager.current_month > 2 else manager.current_month - 2 + 12
         year_m2 = manager.current_year if manager.current_month > 2 else manager.current_year - 1
@@ -1175,10 +1176,11 @@ def main():
         }
 
         # Tabs for different sections
-        tab1, tab2, tab3, tab5 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "📊 Dashboard",
             "🛒 Purchase Orders",
             "👥 Seguimiento clientes",
+            "📍 Seguimiento zona",
             "📁 Export"
         ])
         
@@ -1412,23 +1414,34 @@ def main():
         with tab3:
             from clientes import MESES, client_sku_drivers
             st.header("👥 Seguimiento clientes")
-            f1, f2, f3 = st.columns(3)
+            f1, f2, f3, f4 = st.columns(4)
             with f1:
+                zona_options = sorted([z for z in clientes_df['Zona'].dropna().unique() if str(z).strip() and str(z) != 'Sin Zona']) if 'Zona' in clientes_df.columns else []
+                if not zona_options and 'Zona' in clientes_df.columns and 'Sin Zona' in clientes_df['Zona'].values:
+                    zona_options = ['Sin Zona']
+                selected_zona = st.multiselect("Filtrar por Zona", options=zona_options, default=[], key="cli_filter_zona")
+            with f2:
                 tendencia_options = sorted(clientes_df['Tendencia'].dropna().unique()) if 'Tendencia' in clientes_df.columns else []
                 selected_tendencia = st.multiselect("Filtrar por Tendencia", options=tendencia_options, default=[])
-            with f2:
+            with f3:
                 abc_options = sorted(clientes_df['ABC'].dropna().unique()) if 'ABC' in clientes_df.columns else []
                 selected_abc = st.multiselect("Filtrar por ABC", options=abc_options, default=[])
-            with f3: search_term = st.text_input("🔍 Buscar cliente (código o nombre)", "")
+            with f4:
+                search_term = st.text_input("🔍 Buscar cliente (cód, nombre o zona)", "")
             clientes_display = clientes_df.copy()
+            if selected_zona and 'Zona' in clientes_display: clientes_display = clientes_display[clientes_display.Zona.isin(selected_zona)]
             if selected_tendencia and 'Tendencia' in clientes_display: clientes_display = clientes_display[clientes_display.Tendencia.isin(selected_tendencia)]
             if selected_abc and 'ABC' in clientes_display: clientes_display = clientes_display[clientes_display.ABC.isin(selected_abc)]
             if search_term.strip():
-                clientes_display = clientes_display[clientes_display.Cod.astype(str).str.contains(search_term, case=False, na=False) | clientes_display.Cliente.astype(str).str.contains(search_term, case=False, na=False)]
-            activos = int(clientes_df.L3M.gt(0).sum())
-            inactivos = int(clientes_df.Tendencia.isin(['Inactivo', 'Sin compra reciente']).sum())
-            ytd_total = clientes_df.YTD.sum()
-            ytd_py_total = clientes_df.YTD_PY.sum()
+                clientes_display = clientes_display[
+                    clientes_display.Cod.astype(str).str.contains(search_term, case=False, na=False)
+                    | clientes_display.Cliente.astype(str).str.contains(search_term, case=False, na=False)
+                    | (clientes_display.Zona.astype(str).str.contains(search_term, case=False, na=False) if 'Zona' in clientes_display.columns else False)
+                ]
+            activos = int(clientes_df.L3M.gt(0).sum()) if 'L3M' in clientes_df.columns else 0
+            inactivos = int(clientes_df.Tendencia.isin(['Inactivo', 'Sin compra reciente']).sum()) if 'Tendencia' in clientes_df.columns else 0
+            ytd_total = clientes_df.YTD.sum() if 'YTD' in clientes_df.columns else 0
+            ytd_py_total = clientes_df.YTD_PY.sum() if 'YTD_PY' in clientes_df.columns else 0
             k1,k2,k3,k4=st.columns(4)
             k1.metric("Clientes activos (L3M)", activos)
             k2.metric("Clientes sin compra / inactivos", inactivos)
@@ -1436,10 +1449,11 @@ def main():
             k4.metric("Variación YTD vs PY", f"{(ytd_total-ytd_py_total)/ytd_py_total:+.1%}" if ytd_py_total else "N/A")
             if not clientes_df.empty:
                 st.markdown("🏆 Top 5: " + " · ".join(f"**{r.Cliente}** ({format_eur(r.YTD)})" for _,r in clientes_df.nlargest(5,'YTD').iterrows()))
-            priority = ['Cliente','Ranking YTD','ABC','Cod','YTD','YTD_PY','Var_YTD_%','Var_YTD_abs','L3M','L3M_PY','Var_L3M_YoY_%','Tendencia','Cambio Ranking','Ticket Medio','Recurrencia %','Cuota_%','Meses_sin_compra','Mes en curso (parcial)']
+            priority = ['Cliente', 'Zona', 'Ranking YTD', 'ABC', 'Cod', 'YTD', 'YTD_PY', 'Var_YTD_%', 'Var_YTD_abs', 'L3M', 'L3M_PY', 'Var_L3M_YoY_%', 'Tendencia', 'Cambio Ranking', 'Ticket Medio', 'Recurrencia %', 'Cuota_%', 'Meses_sin_compra', 'Mes en curso (parcial)']
             ordered = [c for c in priority if c in clientes_display] + [c for c in clientes_display if c not in priority]
             config = {c: st.column_config.NumberColumn(c, format="€ %.2f") for c in clientes_display if c in {'YTD','YTD_PY','Var_YTD_abs','L3M','L3M_PY','Mes en curso (parcial)','Ticket Medio'} or c.startswith('Año ') or c in MESES}
             config['Cliente'] = st.column_config.TextColumn('Cliente', pinned=True)
+            if 'Zona' in clientes_display: config['Zona'] = st.column_config.TextColumn('Zona')
             if 'Cuota_%' in clientes_display: config['Cuota_%'] = st.column_config.NumberColumn('Cuota_%', format="%.2f%%")
             if 'Var_YTD_%' in clientes_display: config['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
             if 'Var_L3M_YoY_%' in clientes_display: config['Var_L3M_YoY_%'] = st.column_config.NumberColumn('Var_L3M_YoY_%', format="%.1f%%")
@@ -1463,7 +1477,7 @@ def main():
                 if selected_compare:
                     compare_df = clientes_df[clientes_df.Cod.isin(selected_compare)].copy()
                     cols_compare = [
-                        'Cliente', 'Ranking YTD', 'ABC', 'Cod', 'Tendencia',
+                        'Cliente', 'Zona', 'Ranking YTD', 'ABC', 'Cod', 'Tendencia',
                         'YTD', 'YTD_PY', 'Var_YTD_%', 'Var_YTD_abs',
                         'L3M', 'Ticket Medio', 'Recurrencia %', 'Meses_sin_compra'
                     ]
@@ -1473,6 +1487,7 @@ def main():
                         for c in compare_display if c in {'YTD', 'YTD_PY', 'Var_YTD_abs', 'L3M', 'Ticket Medio'}
                     }
                     comp_cfg['Cliente'] = st.column_config.TextColumn('Cliente', pinned=True)
+                    if 'Zona' in compare_display: comp_cfg['Zona'] = st.column_config.TextColumn('Zona')
                     if 'Var_YTD_%' in compare_display: comp_cfg['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
                     if 'Recurrencia %' in compare_display: comp_cfg['Recurrencia %'] = st.column_config.NumberColumn('Recurrencia %', format="%.1f%%")
                     if 'Meses_sin_compra' in compare_display: comp_cfg['Meses_sin_compra'] = st.column_config.NumberColumn('Meses_sin_compra', format="%.0f")
@@ -1512,6 +1527,188 @@ def main():
                 if selected:
                     up, down = client_sku_drivers(ventas_filtered, selected, getattr(manager,'today',date.today()), top=10); x,y=st.columns(2); x.dataframe(up,use_container_width=True,hide_index=True); y.dataframe(down,use_container_width=True,hide_index=True)
 
+        with tab4:
+            from clientes import MESES, zona_sku_drivers
+            st.header("📍 Seguimiento zona")
+            if zonas_df.empty:
+                st.info("No hay información de zonas disponible en las ventas cargadas.")
+            else:
+                zf1, zf2, zf3 = st.columns(3)
+                with zf1:
+                    z_tendencia_options = sorted(zonas_df['Tendencia'].dropna().unique()) if 'Tendencia' in zonas_df.columns else []
+                    selected_z_tendencia = st.multiselect("Filtrar por Tendencia de Zona", options=z_tendencia_options, default=[], key="z_multisel_tend")
+                with zf2:
+                    z_abc_options = sorted(zonas_df['ABC'].dropna().unique()) if 'ABC' in zonas_df.columns else []
+                    selected_z_abc = st.multiselect("Filtrar por ABC de Zona", options=z_abc_options, default=[], key="z_multisel_abc")
+                with zf3:
+                    z_search_term = st.text_input("🔍 Buscar zona", "", key="z_search_txt")
+
+                zonas_display = zonas_df.copy()
+                if selected_z_tendencia and 'Tendencia' in zonas_display:
+                    zonas_display = zonas_display[zonas_display.Tendencia.isin(selected_z_tendencia)]
+                if selected_z_abc and 'ABC' in zonas_display:
+                    zonas_display = zonas_display[zonas_display.ABC.isin(selected_z_abc)]
+                if z_search_term.strip():
+                    zonas_display = zonas_display[zonas_display.Zona.astype(str).str.contains(z_search_term, case=False, na=False)]
+
+                z_activas = int(zonas_df.L3M.gt(0).sum()) if 'L3M' in zonas_df.columns else len(zonas_df)
+                z_total_clientes = int(zonas_df['Clientes Totales'].sum()) if 'Clientes Totales' in zonas_df.columns else 0
+                z_ytd_total = zonas_df.YTD.sum() if 'YTD' in zonas_df.columns else 0
+                z_ytd_py_total = zonas_df.YTD_PY.sum() if 'YTD_PY' in zonas_df.columns else 0
+
+                zk1, zk2, zk3, zk4 = st.columns(4)
+                zk1.metric("Zonas activas (L3M)", z_activas)
+                zk2.metric("Clientes totales en zonas", z_total_clientes)
+                zk3.metric("YTD Total", format_eur(z_ytd_total))
+                zk4.metric("Variación YTD vs PY", f"{(z_ytd_total - z_ytd_py_total) / z_ytd_py_total:+.1%}" if z_ytd_py_total else "N/A")
+
+                st.markdown("🏆 Top Zonas: " + " · ".join(f"**{r.Zona}** ({format_eur(r.YTD)})" for _, r in zonas_df.nlargest(5, 'YTD').iterrows()))
+
+                priority_z = [
+                    'Zona', 'Ranking YTD', 'ABC', 'Clientes Totales', 'Clientes Activos',
+                    'YTD', 'YTD_PY', 'Var_YTD_%', 'Var_YTD_abs', 'L3M', 'L3M_PY',
+                    'Var_L3M_YoY_%', 'Tendencia', 'Cambio Ranking', 'Ticket Medio',
+                    'Venta Media por Cliente', 'Recurrencia %', 'Cuota_%',
+                    'Meses_sin_compra', 'Mes en curso (parcial)'
+                ]
+                ordered_z = [c for c in priority_z if c in zonas_display] + [c for c in zonas_display if c not in priority_z]
+                config_z = {
+                    c: st.column_config.NumberColumn(c, format="€ %.2f")
+                    for c in zonas_display
+                    if c in {'YTD', 'YTD_PY', 'Var_YTD_abs', 'L3M', 'L3M_PY', 'Mes en curso (parcial)', 'Ticket Medio', 'Venta Media por Cliente'}
+                    or c.startswith('Año ') or c in MESES
+                }
+                config_z['Zona'] = st.column_config.TextColumn('Zona', pinned=True)
+                if 'Cuota_%' in zonas_display: config_z['Cuota_%'] = st.column_config.NumberColumn('Cuota_%', format="%.2f%%")
+                if 'Var_YTD_%' in zonas_display: config_z['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
+                if 'Var_L3M_YoY_%' in zonas_display: config_z['Var_L3M_YoY_%'] = st.column_config.NumberColumn('Var_L3M_YoY_%', format="%.1f%%")
+                if 'Recurrencia %' in zonas_display: config_z['Recurrencia %'] = st.column_config.NumberColumn('Recurrencia %', format="%.1f%%")
+                if 'Meses_sin_compra' in zonas_display: config_z['Meses_sin_compra'] = st.column_config.NumberColumn('Meses_sin_compra', format="%.0f")
+                if 'Ranking YTD' in zonas_display: config_z['Ranking YTD'] = st.column_config.NumberColumn('Ranking YTD', format="%.0f")
+                if 'Ranking PY' in zonas_display: config_z['Ranking PY'] = st.column_config.NumberColumn('Ranking PY', format="%.0f")
+                if 'Cambio Ranking' in zonas_display: config_z['Cambio Ranking'] = st.column_config.NumberColumn('Cambio Ranking', format="%+d")
+                if 'Clientes Totales' in zonas_display: config_z['Clientes Totales'] = st.column_config.NumberColumn('Clientes Totales', format="%.0f")
+                if 'Clientes Activos' in zonas_display: config_z['Clientes Activos'] = st.column_config.NumberColumn('Clientes Activos', format="%.0f")
+
+                st.dataframe(zonas_display[ordered_z], use_container_width=True, height=600, column_config=config_z, hide_index=True)
+
+                # Comparativa directa entre zonas
+                with st.expander("⚖️ Comparativa directa entre zonas", expanded=False):
+                    st.markdown("Selecciona dos o más zonas para comparar sus ventas, métricas y comportamiento mensual frente a frente.")
+                    z_compare_choices = zonas_df.Zona.tolist()
+                    selected_z_compare = st.multiselect(
+                        "Seleccionar zonas para comparar",
+                        options=z_compare_choices,
+                        default=z_compare_choices[:2] if len(z_compare_choices) >= 2 else z_compare_choices,
+                        key="z_compare_multisel"
+                    )
+                    if selected_z_compare:
+                        z_comp_df = zonas_df[zonas_df.Zona.isin(selected_z_compare)].copy()
+                        cols_z_comp = [
+                            'Zona', 'Ranking YTD', 'ABC', 'Clientes Totales', 'Clientes Activos',
+                            'Tendencia', 'YTD', 'YTD_PY', 'Var_YTD_%', 'Var_YTD_abs',
+                            'L3M', 'Ticket Medio', 'Venta Media por Cliente', 'Recurrencia %'
+                        ]
+                        z_comp_display = z_comp_df[[c for c in cols_z_comp if c in z_comp_df]].copy()
+                        z_comp_cfg = {
+                            c: st.column_config.NumberColumn(c, format="€ %.2f")
+                            for c in z_comp_display
+                            if c in {'YTD', 'YTD_PY', 'Var_YTD_abs', 'L3M', 'Ticket Medio', 'Venta Media por Cliente'}
+                        }
+                        z_comp_cfg['Zona'] = st.column_config.TextColumn('Zona', pinned=True)
+                        if 'Var_YTD_%' in z_comp_display: z_comp_cfg['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
+                        if 'Recurrencia %' in z_comp_display: z_comp_cfg['Recurrencia %'] = st.column_config.NumberColumn('Recurrencia %', format="%.1f%%")
+                        if 'Ranking YTD' in z_comp_display: z_comp_cfg['Ranking YTD'] = st.column_config.NumberColumn('Ranking YTD', format="%.0f")
+                        if 'Clientes Totales' in z_comp_display: z_comp_cfg['Clientes Totales'] = st.column_config.NumberColumn('Clientes Totales', format="%.0f")
+                        if 'Clientes Activos' in z_comp_display: z_comp_cfg['Clientes Activos'] = st.column_config.NumberColumn('Clientes Activos', format="%.0f")
+                        st.dataframe(z_comp_display, use_container_width=True, hide_index=True, column_config=z_comp_cfg)
+
+                        z_months_avail = [m for m in MESES if m in z_comp_df.columns]
+                        if z_months_avail:
+                            st.markdown("**Evolución mensual comparativa por zona (Año en curso)**")
+                            z_monthly_comp = pd.melt(
+                                z_comp_df[['Zona'] + z_months_avail],
+                                id_vars=['Zona'],
+                                value_vars=z_months_avail,
+                                var_name='Mes',
+                                value_name='Importe'
+                            )
+                            fig_z_comp = px.line(
+                                z_monthly_comp,
+                                x='Mes',
+                                y='Importe',
+                                color='Zona',
+                                markers=True
+                            )
+                            fig_z_comp.update_layout(xaxis_title="Mes", yaxis_title="Importe Neto (€)", hovermode="x unified", height=400)
+                            st.plotly_chart(fig_z_comp, use_container_width=True)
+                    else:
+                        st.info("Selecciona al menos una zona para comparar.")
+
+                # Gráficos de Zonas
+                zc1, zc2 = st.columns(2)
+                with zc1:
+                    top_z_count = min(15, len(zonas_df))
+                    z_chart = pd.melt(
+                        zonas_df.nlargest(top_z_count, 'YTD')[['Zona', 'YTD', 'YTD_PY']],
+                        id_vars='Zona',
+                        var_name='Periodo',
+                        value_name='Importe'
+                    )
+                    st.plotly_chart(
+                        px.bar(
+                            z_chart,
+                            x='Zona',
+                            y='Importe',
+                            color='Periodo',
+                            barmode='group',
+                            color_discrete_map={'YTD': '#2ecc71', 'YTD_PY': '#95a5a6'}
+                        ),
+                        use_container_width=True
+                    )
+                with zc2:
+                    st.plotly_chart(
+                        px.pie(
+                            zonas_df.nlargest(10, 'YTD'),
+                            names='Zona',
+                            values='YTD',
+                            hole=0.4
+                        ),
+                        use_container_width=True
+                    )
+
+                # Desglose de Clientes por Zona
+                with st.expander("👥 Clientes por zona — ¿Qué clientes componen cada zona?"):
+                    zona_choice_list = zonas_df.Zona.tolist()
+                    chosen_zona = st.selectbox("Seleccionar zona para ver sus clientes", options=zona_choice_list, key="chosen_zona_clients")
+                    if chosen_zona and not clientes_df.empty:
+                        zone_clients = clientes_df[clientes_df.Zona == chosen_zona].copy()
+                        st.write(f"**Total clientes en {chosen_zona}:** {len(zone_clients)}")
+                        z_cli_priority = ['Cliente', 'Ranking YTD', 'ABC', 'Cod', 'YTD', 'YTD_PY', 'Var_YTD_%', 'L3M', 'Tendencia', 'Ticket Medio', 'Recurrencia %']
+                        z_cli_cols = [c for c in z_cli_priority if c in zone_clients]
+                        z_cli_cfg = {
+                            c: st.column_config.NumberColumn(c, format="€ %.2f")
+                            for c in z_cli_cols if c in {'YTD', 'YTD_PY', 'L3M', 'Ticket Medio'}
+                        }
+                        z_cli_cfg['Cliente'] = st.column_config.TextColumn('Cliente', pinned=True)
+                        if 'Var_YTD_%' in z_cli_cols: z_cli_cfg['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
+                        if 'Recurrencia %' in z_cli_cols: z_cli_cfg['Recurrencia %'] = st.column_config.NumberColumn('Recurrencia %', format="%.1f%%")
+                        if 'Ranking YTD' in z_cli_cols: z_cli_cfg['Ranking YTD'] = st.column_config.NumberColumn('Ranking YTD', format="%.0f")
+                        st.dataframe(zone_clients[z_cli_cols], use_container_width=True, hide_index=True, column_config=z_cli_cfg)
+
+                # Detalle SKU por zona
+                with st.expander("🔎 Detalle SKU por zona — ¿Qué productos suben/bajan?"):
+                    selected_z_skus = st.multiselect("Seleccionar zona(s) para analizar SKUs", zona_choice_list, max_selections=5, key="z_skus_multisel")
+                    if selected_z_skus:
+                        up_z, down_z = zona_sku_drivers(ventas_filtered, selected_z_skus, as_of, top=10)
+                        zx, zy = st.columns(2)
+                        with zx:
+                            st.markdown("**Top SKUs con mayor incremento YTD**")
+                            st.dataframe(up_z, use_container_width=True, hide_index=True)
+                        with zy:
+                            st.markdown("**Top SKUs con mayor caída YTD**")
+                            st.dataframe(down_z, use_container_width=True, hide_index=True)
+
         with tab5:
             from inventory_manager import get_export_compras_columns
             st.header("📁 Export Results")
@@ -1522,6 +1719,7 @@ def main():
             with pd.ExcelWriter(clean, engine='openpyxl') as writer:
                 compras_export.to_excel(writer, sheet_name='COMPRAS', index=False)
                 clientes_df.to_excel(writer, sheet_name='CLIENTES', index=False)
+                zonas_df.to_excel(writer, sheet_name='ZONAS', index=False)
             st.download_button("📥 Descargar Pedido (columnas esenciales)", clean.getvalue(), f"pedido_{pd.Timestamp.now():%Y%m%d_%H%M%S}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
             st.caption(f"Incluye {len(available_cols)} columnas: SKU, Marca, histórico ventas, stock, pedido, motivo y alertas.")
             st.divider(); st.subheader("Export completo (debug / auditoría)")
@@ -1529,10 +1727,12 @@ def main():
             with pd.ExcelWriter(full, engine='openpyxl') as writer:
                 compras_filtered.to_excel(writer, sheet_name='COMPRAS_FULL', index=False)
                 clientes_df.to_excel(writer, sheet_name='CLIENTES', index=False)
+                zonas_df.to_excel(writer, sheet_name='ZONAS', index=False)
             st.download_button("📥 Descargar Export completo (todas las columnas)", full.getvalue(), f"full_export_{pd.Timestamp.now():%Y%m%d_%H%M%S}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            col1,col2=st.columns(2)
+            col1,col2,col3=st.columns(3)
             with col1: st.download_button("📄 Solo Pedido (Excel)", dataframe_to_excel_bytes(compras_export,'COMPRAS'), f"compras_{pd.Timestamp.now():%Y%m%d}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             with col2: st.download_button("📄 Solo Clientes (Excel)", dataframe_to_excel_bytes(clientes_df,'CLIENTES'), f"clientes_{pd.Timestamp.now():%Y%m%d}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            with col3: st.download_button("📄 Solo Zonas (Excel)", dataframe_to_excel_bytes(zonas_df,'ZONAS'), f"zonas_{pd.Timestamp.now():%Y%m%d}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 if __name__ == "__main__":
