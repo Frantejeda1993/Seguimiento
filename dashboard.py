@@ -1439,6 +1439,7 @@ def main():
             priority = ['Cliente','Ranking YTD','ABC','Cod','YTD','YTD_PY','Var_YTD_%','Var_YTD_abs','L3M','L3M_PY','Var_L3M_YoY_%','Tendencia','Cambio Ranking','Ticket Medio','Recurrencia %','Cuota_%','Meses_sin_compra','Mes en curso (parcial)']
             ordered = [c for c in priority if c in clientes_display] + [c for c in clientes_display if c not in priority]
             config = {c: st.column_config.NumberColumn(c, format="€ %.2f") for c in clientes_display if c in {'YTD','YTD_PY','Var_YTD_abs','L3M','L3M_PY','Mes en curso (parcial)','Ticket Medio'} or c.startswith('Año ') or c in MESES}
+            config['Cliente'] = st.column_config.TextColumn('Cliente', pinned=True)
             if 'Cuota_%' in clientes_display: config['Cuota_%'] = st.column_config.NumberColumn('Cuota_%', format="%.2f%%")
             if 'Var_YTD_%' in clientes_display: config['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
             if 'Var_L3M_YoY_%' in clientes_display: config['Var_L3M_YoY_%'] = st.column_config.NumberColumn('Var_L3M_YoY_%', format="%.1f%%")
@@ -1471,6 +1472,7 @@ def main():
                         c: st.column_config.NumberColumn(c, format="€ %.2f")
                         for c in compare_display if c in {'YTD', 'YTD_PY', 'Var_YTD_abs', 'L3M', 'Ticket Medio'}
                     }
+                    comp_cfg['Cliente'] = st.column_config.TextColumn('Cliente', pinned=True)
                     if 'Var_YTD_%' in compare_display: comp_cfg['Var_YTD_%'] = st.column_config.NumberColumn('Var_YTD_%', format="%.1f%%")
                     if 'Recurrencia %' in compare_display: comp_cfg['Recurrencia %'] = st.column_config.NumberColumn('Recurrencia %', format="%.1f%%")
                     if 'Meses_sin_compra' in compare_display: comp_cfg['Meses_sin_compra'] = st.column_config.NumberColumn('Meses_sin_compra', format="%.0f")
