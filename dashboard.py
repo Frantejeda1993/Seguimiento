@@ -865,41 +865,77 @@ def main():
     
     # Data loading section
     if data_source == "Upload Files":
-        st.header("📤 Upload Data Files")
+        st.header("📤 Cargar archivos de datos")
         
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            stock_file = st.file_uploader(
-                "Stock Data (Excel/CSV)",
+            ventas_file = st.file_uploader(
+                "1 - Estadistica de ventas",
                 type=['xlsx', 'csv'],
-                help="Upload your stock/inventory file"
+                help="""**Columnas obligatorias:**
+• Artículo: Código o SKU del producto
+• Clave 1: Marca o familia principal
+• Descripción Artículo: Nombre del producto
+• Precio Coste: Coste unitario
+• Cliente: Código del cliente
+• Nombre Cliente: Razón social del cliente
+• Año Factura: Año de venta (ej. 2024, 2025, 2026)
+• Mes Factura: Mes numérico (1 a 12)
+• Importe Neto: Facturación neta total en euros (€)
+• Unidades Venta: Cantidad de unidades vendidas
+• Margen: % Margen sobre venta (CR3, CR2, CR5 o Margen)
+
+**Columnas opcionales / recomendadas:**
+• Representante del cliente (opcional): Zona o comercial del cliente
+• Fecha Factura (opcional): Fecha o día para acumulado diario Month_YTD"""
             )
         
         with col2:
-            ventas_file = st.file_uploader(
-                "Sales Data (Excel/CSV)",
+            stock_file = st.file_uploader(
+                "2 - Consulta Stock",
                 type=['xlsx', 'csv'],
-                help="Upload your sales history file"
+                help="""**Columnas obligatorias:**
+• Artículo: Código o SKU del producto
+• Situación: Estado del artículo (VIGENTE, D - DESCATALOGADO, etc.)
+• Stock: Unidades físicas en almacén
+• Cartera: Pedidos pendientes de clientes
+• Reservas: Unidades reservadas
+• Pendiente Recibir Compra: Compras a proveedores pendientes de recibir
+• Pendiente Entrar Fabricación: Unidades en proceso de fabricación
+• En Tránsito: Unidades en tránsito hacia el almacén
+
+**Columnas opcionales:**
+• Descripción (opcional): Nombre o descripción del artículo"""
             )
         
         with col3:
             recepciones_file = st.file_uploader(
-                "Receptions Data (Excel/CSV)",
+                "3 - Estadistica de Compras (Recepciones)",
                 type=['xlsx', 'csv'],
-                help="Upload your receptions file"
+                help="""**Columnas obligatorias:**
+• Artículo: Código o SKU del producto
+• Fecha Recepción: Fecha de entrada en almacén
+• Unidades Stock: Cantidad de unidades recibidas
+• Precio: Precio unitario de la recepción"""
             )
 
         with col4:
             stock_value_file = st.file_uploader(
-                "Stock Value Data (Excel/CSV)",
+                "4 - Listado Inventario",
                 type=['xlsx', 'csv'],
-                help="Optional: Clave 1, Código Artículo, Unidades, Importe"
+                help="""**Opcional: Valoración contable de inventario.**
+
+**Columnas (si se proporciona este archivo):**
+• Código Artículo (o Artículo): SKU del producto
+• Unidades: Cantidad valorada contablemente
+• Importe: Valor contable total en euros (€)
+• Clave 1 (opcional): Marca del artículo"""
             )
         
-        if st.button("🚀 Process Data", type="primary"):
+        if st.button("🚀 Procesar Datos", type="primary"):
             if stock_file and ventas_file:
-                with st.spinner("Processing data..."):
+                with st.spinner("Procesando datos..."):
                     try:
                         # Load uploaded files
                         manager = InventoryManager(meses_compras=meses_compras)
@@ -958,7 +994,7 @@ def main():
                     except Exception as e:
                         st.error(f"❌ Error loading data: {str(e)}")
             else:
-                st.warning("⚠️ Please upload at least Stock and Sales files")
+                st.warning("⚠️ Por favor, sube al menos '1 - Estadistica de ventas' y '2 - Consulta Stock'")
     
     else:  # Use sample data
         st.header("📊 Sample Data Mode")
